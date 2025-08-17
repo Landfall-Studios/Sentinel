@@ -11,6 +11,8 @@ import java.util.UUID;
 import java.util.Optional;
 import java.util.List;
 import java.util.ArrayList;
+import com.confect1on.sentinel.db.QuarantineInfo;
+import java.sql.Types;
 
 public class DatabaseManager {
 
@@ -69,11 +71,24 @@ public class DatabaseManager {
               created_at  TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
             """;
+            
+        // quarantines: timed quarantine records
+        String createQuarantines = """
+            CREATE TABLE IF NOT EXISTS quarantines (
+              discord_id  VARCHAR(32)  PRIMARY KEY,
+              reason      TEXT         NOT NULL,
+              expires_at  TIMESTAMP    NULL,
+              created_at  TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              created_by  VARCHAR(32)  NOT NULL,
+              INDEX idx_expires_at (expires_at)
+            );
+            """;
 
         try (Connection conn = dataSource.getConnection();
              Statement st = conn.createStatement()) {
             st.executeUpdate(createLinked);
             st.executeUpdate(createPending);
+            st.executeUpdate(createQuarantines);
         } catch (SQLException e) {
             logger.error("Failed to init DB tables", e);
         }
@@ -284,6 +299,191 @@ public class DatabaseManager {
             logger.error("Error getting Discord ID for UUID {}", uuid, e);
         }
         return null;
+    }
+    
+    /**
+     * Adds or updates a quarantine record.
+     * 
+     * @param discordId The Discord ID to quarantine
+     * @param reason The reason for the quarantine
+     * @param expiresAt When the quarantine expires (null for permanent)
+     * @param createdBy Discord ID of who created the quarantine
+     * @return true if successful
+     */
+    public boolean addQuarantine(String discordId, String reason, Instant expiresAt, String createdBy) {
+        String sql = """
+            INSERT INTO quarantines (discord_id, reason, expires_at, created_at, created_by)
+            VALUES (?, ?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE
+              reason = VALUES(reason),
+              expires_at = VALUES(expires_at),
+              created_at = VALUES(created_at),
+              created_by = VALUES(created_by)
+            """;
+        try (Connection c = dataSource.getConnection();
+             PreparedStatement ps = c.prepareStatement(sql)) {
+            ps.setString(1, discordId);
+            ps.setString(2, reason);
+            if (expiresAt != null) {
+                ps.setTimestamp(3, Timestamp.from(expiresAt));
+            } else {
+                ps.setNull(3, Types.TIMESTAMP);
+            }
+            ps.setTimestamp(4, Timestamp.from(Instant.now()));
+            ps.setString(5, createdBy);
+            
+            int rowsAffected = ps.executeUpdate();
+            return rowsAffected > 0;
+        } catch (SQLException e) {
+            logger.error("Error adding quarantine for Discord ID {}", discordId, e);
+            return false;
+        }
+    }
+    
+    /**
+     * Removes a quarantine record.
+     * 
+     * @param discordId The Discord ID to remove quarantine from
+     * @return true if a record was removed
+     */
+    public boolean removeQuarantine(String discordId) {
+        String sql = "DELETE FROM quarantines WHERE discord_id = ?";
+        try (Connection c = dataSource.getConnection();
+             PreparedStatement ps = c.prepareStatement(sql)) {
+            ps.setString(1, discordId);
+            int rowsAffected = ps.executeUpdate();
+            return rowsAffected > 0;
+        } catch (SQLException e) {
+            logger.error("Error removing quarantine for Discord ID {}", discordId, e);
+            return false;
+        }
+    }
+    
+    /**
+     * Gets an active quarantine record for a Discord ID.
+     * 
+     * @param discordId The Discord ID to check
+     * @return QuarantineInfo if quarantined and active, null otherwise
+     */
+    public Optional<QuarantineInfo> getActiveQuarantine(String discordId) {
+        String sql = "SELECT discord_id, reason, expires_at, created_at, created_by FROM quarantines WHERE discord_id = ?";
+        try (Connection c = dataSource.getConnection();
+             PreparedStatement ps = c.prepareStatement(sql)) {
+            ps.setString(1, discordId);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) {
+                    return Optional.empty();
+                }
+                
+                Timestamp expiresAtTs = rs.getTimestamp("expires_at");
+                Instant expiresAt = expiresAtTs != null ? expiresAtTs.toInstant() : null;
+                
+                QuarantineInfo info = new QuarantineInfo(
+                    rs.getString("discord_id"),
+                    rs.getString("reason"),
+                    expiresAt,
+                    rs.getTimestamp("created_at").toInstant(),
+                    rs.getString("created_by")
+                );
+                
+                // Return only if still active
+                return info.isActive() ? Optional.of(info) : Optional.empty();
+            }
+        } catch (SQLException e) {
+            logger.error("Error getting quarantine for Discord ID {}", discordId, e);
+            return Optional.empty();
+        }
+    }
+    
+    /**
+     * Gets all active quarantine records.
+     * Used for administrative purposes.
+     * 
+     * @return List of active quarantine records
+     */
+    public List<QuarantineInfo> getAllActiveQuarantines() {
+        String sql = "SELECT discord_id, reason, expires_at, created_at, created_by FROM quarantines";
+        List<QuarantineInfo> quarantines = new ArrayList<>();
+        
+        try (Connection c = dataSource.getConnection();
+             PreparedStatement ps = c.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+            
+            while (rs.next()) {
+                Timestamp expiresAtTs = rs.getTimestamp("expires_at");
+                Instant expiresAt = expiresAtTs != null ? expiresAtTs.toInstant() : null;
+                
+                QuarantineInfo info = new QuarantineInfo(
+                    rs.getString("discord_id"),
+                    rs.getString("reason"),
+                    expiresAt,
+                    rs.getTimestamp("created_at").toInstant(),
+                    rs.getString("created_by")
+                );
+                
+                // Only include active quarantines
+                if (info.isActive()) {
+                    quarantines.add(info);
+                }
+            }
+        } catch (SQLException e) {
+            logger.error("Error getting all active quarantines", e);
+        }
+        
+        return quarantines;
+    }
+
+    /**
+     * Gets all expired quarantines.
+     * 
+     * @return List of expired quarantines
+     */
+    public List<QuarantineInfo> getExpiredQuarantines() {
+        String sql = """
+            SELECT discord_id, reason, expires_at, created_at, created_by
+            FROM quarantines
+            WHERE expires_at IS NOT NULL AND expires_at <= ?
+            """;
+        
+        List<QuarantineInfo> expired = new ArrayList<>();
+        
+        try (Connection c = dataSource.getConnection();
+             PreparedStatement ps = c.prepareStatement(sql)) {
+            ps.setTimestamp(1, Timestamp.from(Instant.now()));
+            
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    expired.add(new QuarantineInfo(
+                        rs.getString("discord_id"),
+                        rs.getString("reason"),
+                        rs.getTimestamp("expires_at").toInstant(),
+                        rs.getTimestamp("created_at").toInstant(),
+                        rs.getString("created_by")
+                    ));
+                }
+            }
+        } catch (SQLException e) {
+            logger.error("Error getting expired quarantines", e);
+        }
+        
+        return expired;
+    }
+    
+    /**
+     * Removes expired quarantine records from the database.
+     */
+    public void cleanupExpiredQuarantines() {
+        String sql = "DELETE FROM quarantines WHERE expires_at IS NOT NULL AND expires_at <= ?";
+        try (Connection c = dataSource.getConnection();
+             PreparedStatement ps = c.prepareStatement(sql)) {
+            ps.setTimestamp(1, Timestamp.from(Instant.now()));
+            int deleted = ps.executeUpdate();
+            if (deleted > 0) {
+                logger.debug("Cleaned up {} expired quarantine records", deleted);
+            }
+        } catch (SQLException e) {
+            logger.error("Error cleaning up expired quarantines", e);
+        }
     }
 
     public void close() {

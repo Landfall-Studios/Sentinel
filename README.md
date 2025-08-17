@@ -11,16 +11,51 @@
     /whois [discord: @user | minecraft: username]
     Look up linked account info.
 
-    /quarantine <user>
-    Toggle quarantine role for a user (Minecraft username or Discord @mention).
-    Requires staff role permissions. Automatically kicks online players when quarantined.
+#### `/quarantine`
+**Purpose:** Add a quarantine to a Discord user or show their current quarantine status.
+
+**Usage:**
+- **Show status:** `/quarantine @user`
+- **Add permanent quarantine:** `/quarantine @user reason:"Rule violation"`
+- **Add temporary quarantine:** `/quarantine @user duration:2h reason:"Griefing"`
+
+**Parameters:**
+- `user` (required): Discord user to quarantine
+- `duration` (optional): Duration in format like `30m`, `2h`, `3d`, `1w`
+- `reason` (optional): Reason for the quarantine
+
+**Duration formats:**
+- `30s` = 30 seconds
+- `15m` = 15 minutes  
+- `2h` = 2 hours
+- `7d` = 7 days
+- `2w` = 2 weeks
+
+**Features:**
+- Automatically kicks online players when quarantined
+- Shows detailed status with colored Discord formatting
+- Tracks creation time and administrator who created it
+- Automatic cleanup of expired quarantines
+
+#### `/unquarantine`
+**Purpose:** Remove a quarantine from a Discord user.
+
+**Usage:**
+- `/unquarantine @user`
+
+**Parameters:**
+- `user` (required): Discord user to remove quarantine from
+
+**Features:**
+- Shows previous quarantine details when removing
+- Only works if user is currently quarantined
 
 ## Features
 
 - **Account Linking**: Secure verification system linking Minecraft accounts to Discord
 - **Login Protection**: Prevents unlinked accounts from joining (with configurable bypass servers)
 - **Role Management**: Automatic Discord role assignment for linked players
-- **Quarantine System**: Staff can quarantine problematic players, preventing login and kicking online players
+- **Quarantine System**: Staff can quarantine problematic players with timed bans, preventing login and kicking online players
 - **Automatic Cleanup**: Removes database entries for users who leave Discord
 - **Rate Limiting**: Respects Discord API limits with intelligent rate limiting
 
@@ -69,10 +104,12 @@
   - Role synchronization spreads over ~20 minutes for large databases
 
 - **`quarantineRole`**: (Optional) Discord role ID for quarantined players. When configured:
-  - Players with this role are denied login
-  - Staff can use `/quarantine` command to toggle this role
+  - Applied/removed automatically when quarantines are added/removed
+  - Used for Discord channel restrictions and effects
+  - **NOT used for login blocking** - only database quarantines block login
   - Online players are immediately kicked when quarantined
+  - Supports temporary bans with custom durations and reasons
 
-- **`quarantineMessage`**: Message shown to quarantined players when they try to join or are kicked
+- **`quarantineMessage`**: Default message shown to quarantined players (overridden by custom quarantine messages with details)
 
 - **`staffRoles`**: Array of Discord role IDs that can use the `/quarantine` command

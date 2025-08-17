@@ -7,7 +7,7 @@ plugins {
 }
 
 group = 'com.confect1on'
-version = '1.1.0'
+version = '1.1.1'
 
 def targetJavaVersion = 17
 
@@ -35,7 +35,8 @@ dependencies {
 }
 
 java {
-    toolchain.languageVersion = JavaLanguageVersion.of(targetJavaVersion)
+    sourceCompatibility = targetJavaVersion
+    targetCompatibility = targetJavaVersion
 }
 
 tasks.withType(JavaCompile).configureEach {

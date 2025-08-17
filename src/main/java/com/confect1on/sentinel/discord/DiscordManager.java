@@ -23,6 +23,7 @@ public class DiscordManager extends ListenerAdapter {
     private final LinkCommandListener linkListener;
     private final WhoIsCommandListener whoisListener;
     private final QuarantineCommandListener quarantineListener;
+    private final UnquarantineCommandListener unquarantineCommandListener;
     private RoleManager roleManager;
     private QuarantineChecker quarantineChecker;
 
@@ -38,24 +39,24 @@ public class DiscordManager extends ListenerAdapter {
         this.linkListener = new LinkCommandListener(db, logger);
         this.whoisListener = new WhoIsCommandListener(db, logger);
         this.quarantineListener = new QuarantineCommandListener(db, quarantineRoleId, staffRoles, proxyServer, config, logger);
+        this.unquarantineCommandListener = new UnquarantineCommandListener(db, staffRoles, quarantineRoleId, logger);
     }
 
     public void start() throws LoginException {
         jda = JDABuilder.createDefault(token)
                 .enableIntents(GatewayIntent.GUILD_MEMBERS)
-                .addEventListeners(linkListener, whoisListener, quarantineListener, this)
+                .addEventListeners(linkListener, whoisListener, quarantineListener, unquarantineCommandListener, this)
                 .build();
 
-        // Register both /link and /whois commands
-        jda.updateCommands()
-                .addCommands(
-                        linkListener.getCommandData(),
-                        whoisListener.getCommandData(),
-                        quarantineListener.getCommandData()
-                )
-                .queue();
+        // Register slash commands
+        jda.updateCommands().addCommands(
+            linkListener.getCommandData(),
+            quarantineListener.getCommandData(),
+            unquarantineCommandListener.getCommandData(),
+            whoisListener.getCommandData()
+        ).queue();
 
-        logger.info("[Sentinel] Discord bot started with /link, /whois, and /quarantine.");
+        logger.info("[Sentinel] Discord bot started with /link, /whois, /quarantine, and /unquarantine.");
     }
 
     @Override
@@ -83,6 +84,9 @@ public class DiscordManager extends ListenerAdapter {
     public void shutdown() {
         if (roleManager != null) {
             roleManager.shutdown();
+        }
+        if (quarantineChecker != null) {
+            quarantineChecker.shutdown();
         }
         if (jda != null) {
             jda.shutdown();

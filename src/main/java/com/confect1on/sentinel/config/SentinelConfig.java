@@ -4,6 +4,7 @@ public class SentinelConfig {
     public MySQL mysql = new MySQL();
     public Discord discord = new Discord();
     public BypassServers bypassServers = new BypassServers();
+    public Impersonation impersonation = new Impersonation();
 
     public static class MySQL {
         public String host = "localhost";
@@ -23,5 +24,10 @@ public class SentinelConfig {
 
     public static class BypassServers {
         public String[] servers = new String[0];
+    }
+
+    public static class Impersonation {
+        public boolean enabled = false;
+        public String[] allowedUsers = new String[0];
     }
 }

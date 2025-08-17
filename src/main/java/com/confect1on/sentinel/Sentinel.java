@@ -3,6 +3,10 @@ package com.confect1on.sentinel;
 import com.confect1on.sentinel.config.ConfigLoader;
 import com.confect1on.sentinel.db.DatabaseManager;
 import com.confect1on.sentinel.discord.DiscordManager;
+import com.confect1on.sentinel.impersonation.ImpersonateCommand;
+import com.confect1on.sentinel.impersonation.ImpersonationManager;
+import com.confect1on.sentinel.listener.DisconnectListener;
+import com.confect1on.sentinel.listener.GameProfileListener;
 import com.confect1on.sentinel.listener.LoginListener;
 import com.google.inject.Inject;
 import com.velocitypowered.api.event.proxy.ProxyInitializeEvent;
@@ -24,6 +28,7 @@ public class Sentinel {
 
     private DatabaseManager database;
     private DiscordManager discord;
+    private ImpersonationManager impersonationManager;
 
     @Subscribe
     public void onProxyInitialization(ProxyInitializeEvent event) {
@@ -49,8 +54,26 @@ public class Sentinel {
             logger.warn("❌ Failed to start Discord bot, no token provided!");
         }
 
-        // register login guard (after Discord is initialized)
-        server.getEventManager().register(this, new LoginListener(database, config, discord, logger));
+        // Initialize impersonation manager if enabled
+        if (config.impersonation.enabled) {
+            impersonationManager = new ImpersonationManager(dataDirectory, logger);
+            impersonationManager.setAllowedUsers(config.impersonation.allowedUsers);
+            
+            // Register the impersonation command
+            ImpersonateCommand impersonateCommand = new ImpersonateCommand(impersonationManager, logger);
+            server.getCommandManager().register("simulacra", impersonateCommand, "sim");
+            
+            // Register the game profile listener (runs EARLY to modify profile before login check)
+            server.getEventManager().register(this, new GameProfileListener(impersonationManager, logger));
+            
+            // Register disconnect listener to clean up active impersonations
+            server.getEventManager().register(this, new DisconnectListener(impersonationManager, logger));
+            
+            logger.info("✅ Impersonation feature enabled with {} allowed users", config.impersonation.allowedUsers.length);
+        }
+        
+        // register login guard (after Discord and impersonation are initialized)
+        server.getEventManager().register(this, new LoginListener(database, config, discord, impersonationManager, logger));
 
         logger.info("✅ Sentinel up and running.");
     }

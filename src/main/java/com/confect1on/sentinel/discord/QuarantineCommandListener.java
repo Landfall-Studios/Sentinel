@@ -2,7 +2,9 @@ package com.confect1on.sentinel.discord;
 
 import com.confect1on.sentinel.db.DatabaseManager;
 import com.confect1on.sentinel.db.LinkInfo;
+import com.confect1on.sentinel.db.QuarantineInfo;
 import com.confect1on.sentinel.config.SentinelConfig;
+import com.confect1on.sentinel.util.DurationParser;
 import net.dv8tion.jda.api.entities.Guild;
 import net.dv8tion.jda.api.entities.Member;
 import net.dv8tion.jda.api.entities.Role;
@@ -17,7 +19,9 @@ import net.kyori.adventure.text.Component;
 import org.slf4j.Logger;
 
 import javax.annotation.Nonnull;
+import java.time.Instant;
 import java.util.Optional;
+import net.dv8tion.jda.api.interactions.InteractionHook;
 
 public class QuarantineCommandListener extends ListenerAdapter {
     private final DatabaseManager db;
@@ -28,8 +32,10 @@ public class QuarantineCommandListener extends ListenerAdapter {
     private final SentinelConfig config;
 
     private final SlashCommandData commandData = Commands
-            .slash("quarantine", "Toggle quarantine role for a user")
-            .addOption(OptionType.STRING, "user", "Minecraft username or Discord @mention", true);
+            .slash("quarantine", "Add a quarantine to a Discord user or show quarantine status")
+            .addOption(OptionType.USER, "user", "Discord user to quarantine", true)
+            .addOption(OptionType.STRING, "duration", "Quarantine duration (e.g., 1h, 3d, 1w)", false)
+            .addOption(OptionType.STRING, "reason", "Reason for quarantine", false);
 
     public QuarantineCommandListener(DatabaseManager db, String quarantineRoleId, String[] staffRoles, ProxyServer proxyServer, SentinelConfig config, Logger logger) {
         this.db = db;
@@ -60,99 +66,79 @@ public class QuarantineCommandListener extends ListenerAdapter {
             return;
         }
 
-        var userOption = event.getOption("user");
+        var userOpt = event.getOption("user");
+        var durationOpt = event.getOption("duration");
+        var reasonOpt = event.getOption("reason");
 
-        if (userOption == null) {
-            event.reply("❌ User parameter is required.").setEphemeral(true).queue();
+        // Validate that exactly one target option is provided
+        if (userOpt == null) {
+            event.reply("❗️ You must specify a Discord user.").setEphemeral(true).queue();
             return;
         }
-
-        String userInput = userOption.getAsString();
 
         // Defer reply since we'll be doing database and Discord API calls
         event.deferReply().queue(hook -> {
             try {
-                // Find the quarantine role
-                Role quarantineRole = null;
-                Guild targetGuild = null;
+                // Get Discord ID and username based on input type
+                String discordId = userOpt.getAsUser().getId();
+                String displayName = userOpt.getAsUser().getAsTag();
 
-                for (Guild guild : event.getJDA().getGuilds()) {
-                    Role role = guild.getRoleById(quarantineRoleId);
-                    if (role != null) {
-                        quarantineRole = role;
-                        targetGuild = guild;
-                        break;
-                    }
-                }
+                // Check current quarantine status
+                Optional<QuarantineInfo> existingQuarantine = db.getActiveQuarantine(discordId);
 
-                if (quarantineRole == null || targetGuild == null) {
-                    hook.sendMessage("❌ Quarantine role not found in any guild.").queue();
+                // If no parameters provided, show current status
+                if (durationOpt == null && reasonOpt == null) {
+                    showQuarantineStatus(hook, displayName, existingQuarantine);
                     return;
                 }
 
-                // Parse user input - could be Discord mention or Minecraft username
-                String discordId = null;
-                String minecraftUsername = null;
+                // If quarantine exists, show error - user needs to remove first
+                if (existingQuarantine.isPresent()) {
+                    hook.sendMessage("❌ " + displayName + " is already quarantined. Use `/unquarantine` to remove it first.").queue();
+                    return;
+                }
 
-                if (userInput.startsWith("<@") && userInput.endsWith(">")) {
-                    // Discord mention
-                    discordId = userInput.replaceAll("[<@!>]", "");
-                } else {
-                    // Assume Minecraft username
-                    minecraftUsername = userInput;
-                    
-                    // Look up Discord ID from database
-                    Optional<LinkInfo> linkInfo = db.findByUsername(minecraftUsername);
-                    if (linkInfo.isPresent()) {
-                        discordId = linkInfo.get().discordId();
-                    } else {
-                        hook.sendMessage("❌ No linked account found for Minecraft username: " + minecraftUsername).queue();
+                // Add new quarantine
+                String reason = reasonOpt != null ? reasonOpt.getAsString() : "No reason provided";
+                String durationStr = durationOpt != null ? durationOpt.getAsString() : null;
+                
+                // Parse duration
+                Instant expiresAt = null;
+                String durationDisplay = "Permanent";
+                
+                if (durationStr != null && !durationStr.trim().isEmpty()) {
+                    if (!DurationParser.isValidDuration(durationStr)) {
+                        hook.sendMessage("❌ Invalid duration format. Use formats like: 30m, 2h, 3d, 1w").queue();
                         return;
                     }
+                    expiresAt = DurationParser.parseDurationToExpiry(durationStr);
+                    durationDisplay = DurationParser.formatDuration(DurationParser.parseDurationToSeconds(durationStr));
                 }
 
-                // Make discordId final for use in lambdas
-                final String finalDiscordId = discordId;
-
-                // Find the member in Discord
-                Member targetMember;
-                try {
-                    targetMember = targetGuild.retrieveMemberById(finalDiscordId).complete();
-                } catch (Exception e) {
-                    hook.sendMessage("❌ User not found in Discord server.").queue();
-                    return;
-                }
-
-                // Toggle the quarantine role
-                boolean hasQuarantineRole = targetMember.getRoles().contains(quarantineRole);
+                // Add quarantine to database
+                boolean added = db.addQuarantine(discordId, reason, expiresAt, event.getUser().getId());
                 
-                if (hasQuarantineRole) {
-                    // Remove quarantine role
-                    targetGuild.removeRoleFromMember(targetMember, quarantineRole).queue(
-                        success -> {
-                            hook.sendMessage("✅ Removed quarantine role from " + targetMember.getEffectiveName()).queue();
-                            logger.info("✅ {} removed quarantine role from {}", event.getUser().getAsTag(), targetMember.getEffectiveName());
-                        },
-                        error -> {
-                            hook.sendMessage("❌ Failed to remove quarantine role: " + error.getMessage()).queue();
-                            logger.error("🚫 Failed to remove quarantine role from {}", targetMember.getEffectiveName(), error);
-                        }
-                    );
+                if (added) {
+                    // Apply Discord role
+                    boolean roleApplied = applyDiscordQuarantineRole(event, discordId, displayName);
+                    
+                    StringBuilder message = new StringBuilder();
+                    message.append("🚫 **Added quarantine to ").append(displayName).append("**\n");
+                    message.append("**Duration:** `").append(durationDisplay).append("`\n");
+                    message.append("**Reason:** ").append(reason).append("\n");
+                    if (roleApplied) {
+                        message.append("**Discord role:** ✅ Applied");
+                    } else {
+                        message.append("**Discord role:** ❌ Failed to apply");
+                    }
+                    
+                    hook.sendMessage(message.toString()).queue();
+                    logger.info("🚫 {} quarantined {} for {} ({})", event.getUser().getAsTag(), displayName, durationDisplay, reason);
+                    
+                    // Kick the player if they're currently online
+                    kickPlayerIfOnline(discordId, displayName);
                 } else {
-                    // Add quarantine role
-                    targetGuild.addRoleToMember(targetMember, quarantineRole).queue(
-                        success -> {
-                            hook.sendMessage("🚫 Added quarantine role to " + targetMember.getEffectiveName()).queue();
-                            logger.info("🚫 {} added quarantine role to {}", event.getUser().getAsTag(), targetMember.getEffectiveName());
-                            
-                            // Kick the player if they're currently online
-                            kickPlayerIfOnline(finalDiscordId, targetMember.getEffectiveName());
-                        },
-                        error -> {
-                            hook.sendMessage("❌ Failed to add quarantine role: " + error.getMessage()).queue();
-                            logger.error("🚫 Failed to add quarantine role to {}", targetMember.getEffectiveName(), error);
-                        }
-                    );
+                    hook.sendMessage("❌ Failed to add quarantine to " + displayName).queue();
                 }
 
             } catch (Exception e) {
@@ -161,7 +147,37 @@ public class QuarantineCommandListener extends ListenerAdapter {
             }
         });
     }
-
+    
+    /**
+     * Shows the current quarantine status of a user.
+     */
+    private void showQuarantineStatus(InteractionHook hook, String displayName, 
+                                    Optional<QuarantineInfo> quarantine) {
+        StringBuilder message = new StringBuilder();
+        
+        if (quarantine.isPresent()) {
+            QuarantineInfo info = quarantine.get();
+            message.append("🚫 **").append(displayName).append(" is quarantined**\n\n");
+            message.append("**Reason:** ").append(info.reason()).append("\n");
+            message.append("**Created:** <t:").append(info.createdAt().getEpochSecond()).append(":R>\n");
+            message.append("**Created by:** <@").append(info.createdBy()).append(">\n");
+            
+            if (info.isPermanent()) {
+                message.append("**Duration:** `Permanent`\n");
+            } else {
+                message.append("**Duration:** `").append(info.getFormattedTimeRemaining()).append("`\n");
+                message.append("**Expires:** <t:").append(info.expiresAt().getEpochSecond()).append(":R>\n");
+            }
+            
+            // Removed Discord role status as it's no longer tracked
+        } else {
+            message.append("✅ **").append(displayName).append(" is not quarantined**\n\n");
+            message.append("**Status:** Clean - no quarantine found\n");
+        }
+        
+        hook.sendMessage(message.toString()).queue();
+    }
+    
     private boolean hasStaffPermission(SlashCommandInteractionEvent event) {
         // If no staff roles are configured, fail shut
         if (staffRoles == null || staffRoles.length == 0) {
@@ -190,6 +206,59 @@ public class QuarantineCommandListener extends ListenerAdapter {
         }
         
         return false;
+    }
+
+    /**
+     * Applies the Discord quarantine role to a user.
+     */
+    private boolean applyDiscordQuarantineRole(SlashCommandInteractionEvent event, String discordId, String displayName) {
+        if (quarantineRoleId == null || quarantineRoleId.isBlank()) {
+            logger.warn("Attempted to apply Discord quarantine role, but quarantineRoleId is not configured.");
+            return false;
+        }
+
+        try {
+            // Find the quarantine role and guild
+            Guild targetGuild = null;
+            Role targetRole = null;
+            
+            for (Guild guild : event.getJDA().getGuilds()) {
+                Role role = guild.getRoleById(quarantineRoleId);
+                if (role != null) {
+                    targetGuild = guild;
+                    targetRole = role;
+                    break;
+                }
+            }
+
+            if (targetRole == null || targetGuild == null) {
+                logger.error("Configured quarantine role with ID {} not found in any guild.", quarantineRoleId);
+                return false;
+            }
+
+            // Retrieve the member
+            Member member = targetGuild.retrieveMemberById(discordId).complete();
+
+            // Add the role if it's not already present
+            if (!member.getRoles().contains(targetRole)) {
+                final String roleName = targetRole.getName(); // Final variable for lambda
+                targetGuild.addRoleToMember(member, targetRole).queue(
+                        success -> {
+                            logger.info("🚫 Discord quarantine role {} applied to {} ({})", roleName, displayName, discordId);
+                        },
+                        failure -> {
+                            logger.error("❌ Failed to apply Discord quarantine role {} to {} ({})", roleName, displayName, discordId, failure);
+                        }
+                );
+                return true;
+            } else {
+                logger.debug("🚫 Discord quarantine role {} already applied to {} ({})", targetRole.getName(), displayName, discordId);
+                return true; // Role already applied
+            }
+        } catch (Exception e) {
+            logger.error("❌ Error applying Discord quarantine role for {} ({})", displayName, discordId, e);
+            return false;
+        }
     }
 
     /**
