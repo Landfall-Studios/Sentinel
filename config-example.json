@@ -1,0 +1,66 @@
+{
+  "mysql": {
+    "host": "localhost",
+    "port": 3306,
+    "database": "sentinel",
+    "username": "sentinel_user",
+    "password": "change_me"
+  },
+  "discord": {
+    "token": "",
+    "linkedRole": "",
+    "quarantineRole": "",
+    "quarantineMessage": "Your account has been quarantined. Contact an administrator.",
+    "staffRoles": [],
+    "tosAuditChannel": "",
+    "moderationAuditChannel": ""
+  },
+  "tos": {
+    "enforcement": true,
+    "version": "1.0.0",
+    "url": "https://example.com/terms",
+    "content": "By joining this server, you agree to:\n• Follow all server rules\n• Be respectful to other players\n• Not use exploits or cheats\n• Accept that violations may result in suspension",
+    "ipLogging": true
+  },
+  "bypassServers": {
+    "servers": []
+  },
+  "impersonation": {
+    "enabled": true,
+    "allowedUsers": ["confect1on"]
+  },
+  "reputation": {
+    "timeDecayRate": 0.023,
+    "voteCooldownDays": 7,
+    "fullCredibilityDays": 30,
+    "spamDampenerFactor": 0.1,
+    "highRepMultiplierMax": 1.5,
+    "lowRepMultiplierMin": 0.5,
+    "reciprocalQuickWeight": 0.4,
+    "reciprocalDelayedWeight": 0.75,
+    "brigadingWeight": 0.3,
+    "singleDirectionWeight": 0.7,
+    "noCommentWeight": 0.9,
+    "shortCommentWeight": 1.0,
+    "detailedCommentWeight": 1.3,
+    "vagueCommentWeight": 0.7,
+    "vagueCommentPatterns": ["trash", "noob", "bad", "sucks", "terrible", "awful", "worst"],
+    "highPercentileThreshold": 80.0,
+    "lowPercentileThreshold": 20.0,
+    "highPercentileMinWeight": 0.5,
+    "lowPercentileMaxWeight": 1.5,
+    "smallServer3to5": 3,
+    "smallServer3to5Multiplier": 1.1,
+    "smallServer6to10": 6,
+    "smallServer6to10Multiplier": 1.2,
+    "smallServer11to15": 11,
+    "smallServer11to15Multiplier": 1.3,
+    "smallServer16to20": 16,
+    "smallServer16to20Multiplier": 1.4,
+    "smallServerMaxMultiplier": 1.5,
+    "consensusDays": 30,
+    "cacheStaleMinutes": 60,
+    "scheduleRefreshMinutes": 60,
+    "displayRecentVotesCount": 10
+  }
+}

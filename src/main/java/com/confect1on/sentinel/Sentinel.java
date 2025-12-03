@@ -8,6 +8,9 @@ import com.confect1on.sentinel.impersonation.ImpersonationManager;
 import com.confect1on.sentinel.listener.DisconnectListener;
 import com.confect1on.sentinel.listener.GameProfileListener;
 import com.confect1on.sentinel.listener.LoginListener;
+import com.confect1on.sentinel.reputation.ReputationCommand;
+import com.confect1on.sentinel.tos.TosManager;
+import com.confect1on.sentinel.util.IpLogger;
 import com.google.inject.Inject;
 import com.velocitypowered.api.event.proxy.ProxyInitializeEvent;
 import com.velocitypowered.api.event.proxy.ProxyShutdownEvent;
@@ -71,9 +74,28 @@ public class Sentinel {
             
             logger.info("✅ Impersonation feature enabled with {} allowed users", config.impersonation.allowedUsers.length);
         }
+
+        // Register reputation command if Discord is enabled
+        if (discord != null && discord.getReputationManager() != null) {
+            ReputationCommand repCommand = new ReputationCommand(database, discord.getReputationManager(), logger);
+            server.getCommandManager().register("rep", repCommand, "reputation");
+            logger.info("✅ Reputation command registered");
+        }
+
+        // Initialize ToS manager and IP logger
+        TosManager tosManager = null;
+        IpLogger ipLogger = null;
         
-        // register login guard (after Discord and impersonation are initialized)
-        server.getEventManager().register(this, new LoginListener(database, config, discord, impersonationManager, logger));
+        if (discord != null && discord.getTosManager() != null) {
+            tosManager = discord.getTosManager();
+        }
+        
+        if (config.tos.ipLogging) {
+            ipLogger = new IpLogger(database, config.tos, logger);
+        }
+        
+        // register login guard (after Discord, ToS, and impersonation are initialized)
+        server.getEventManager().register(this, new LoginListener(database, config, discord, impersonationManager, tosManager, ipLogger, logger));
 
         logger.info("✅ Sentinel up and running.");
     }

@@ -7,7 +7,7 @@ plugins {
 }
 
 group = 'com.confect1on'
-version = '1.1.1'
+version = '1.2.2'
 
 def targetJavaVersion = 17
 

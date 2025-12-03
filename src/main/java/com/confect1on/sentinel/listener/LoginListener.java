@@ -5,6 +5,8 @@ import com.confect1on.sentinel.db.QuarantineInfo;
 import com.confect1on.sentinel.config.SentinelConfig;
 import com.confect1on.sentinel.discord.DiscordManager;
 import com.confect1on.sentinel.impersonation.ImpersonationManager;
+import com.confect1on.sentinel.tos.TosManager;
+import com.confect1on.sentinel.util.IpLogger;
 import com.velocitypowered.api.event.PostOrder;
 import com.velocitypowered.api.event.Subscribe;
 import com.velocitypowered.api.event.connection.LoginEvent;
@@ -22,12 +24,16 @@ public class LoginListener {
     private final SentinelConfig config;
     private final DiscordManager discordManager;
     private final ImpersonationManager impersonationManager;
+    private final TosManager tosManager;
+    private final IpLogger ipLogger;
 
-    public LoginListener(DatabaseManager database, SentinelConfig config, DiscordManager discordManager, ImpersonationManager impersonationManager, Logger logger) {
+    public LoginListener(DatabaseManager database, SentinelConfig config, DiscordManager discordManager, ImpersonationManager impersonationManager, TosManager tosManager, IpLogger ipLogger, Logger logger) {
         this.database = database;
         this.config = config;
         this.discordManager = discordManager;
         this.impersonationManager = impersonationManager;
+        this.tosManager = tosManager;
+        this.ipLogger = ipLogger;
         this.logger = logger;
     }
 
@@ -35,6 +41,9 @@ public class LoginListener {
     public void onLogin(LoginEvent event) {
         UUID uuid = event.getPlayer().getGameProfile().getId();
         String username = event.getPlayer().getUsername();
+        
+        // Get IP address for logging
+        String ipAddress = event.getPlayer().getRemoteAddress().getAddress().getHostAddress();
         
         // Check if this is an impersonated UUID and get the original if so
         UUID originalUuid = uuid;
@@ -56,6 +65,12 @@ public class LoginListener {
                 if (virtualHost.toLowerCase().contains(server.toLowerCase())) {
                     logger.info("✅ {} ({}) connecting through bypass virtual host {}. Allowing login.", 
                         username, uuid, virtualHost);
+                    
+                    // Log successful bypass login
+                    if (ipLogger != null) {
+                        ipLogger.logLogin(originalUuid, null, ipAddress, true, null);
+                    }
+                    
                     event.setResult(ComponentResult.allowed());
                     return;
                 }
@@ -79,9 +94,39 @@ public class LoginListener {
                         String code = generateCode();
                         database.savePendingCode(originalUuid, code);
                         
+                        // Log denied login
+                        if (ipLogger != null) {
+                            ipLogger.logLogin(originalUuid, discordId, ipAddress, false, "Discord account no longer in server");
+                        }
+                        
                         event.setResult(ComponentResult.denied(
-                            Component.text("Your Discord account is no longer linked.\n" +
-                                "Use code §b" + code + "§r in Discord to link.")
+                            Component.text()
+                                .append(Component.text("⚠  ACCOUNT NO LONGER LINKED\n")
+                                    .color(net.kyori.adventure.text.format.NamedTextColor.RED)
+                                    .decorate(net.kyori.adventure.text.format.TextDecoration.BOLD))
+                                .append(Component.text("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
+                                    .color(net.kyori.adventure.text.format.NamedTextColor.GRAY))
+                                .append(Component.text("Your Discord account is no longer linked.\n\n")
+                                    .color(net.kyori.adventure.text.format.NamedTextColor.WHITE))
+                                .append(Component.text("Your link code: ")
+                                    .color(net.kyori.adventure.text.format.NamedTextColor.YELLOW))
+                                .append(Component.text(code)
+                                    .color(net.kyori.adventure.text.format.NamedTextColor.AQUA)
+                                    .decorate(net.kyori.adventure.text.format.TextDecoration.BOLD))
+                                .append(Component.text("\n\nTo re-link your account:\n")
+                                    .color(net.kyori.adventure.text.format.NamedTextColor.GREEN))
+                                .append(Component.text("   1. Join our Discord server\n")
+                                    .color(net.kyori.adventure.text.format.NamedTextColor.GRAY))
+                                .append(Component.text("   2. Run ")
+                                    .color(net.kyori.adventure.text.format.NamedTextColor.GRAY))
+                                .append(Component.text("/link " + code)
+                                    .color(net.kyori.adventure.text.format.NamedTextColor.GREEN)
+                                    .decorate(net.kyori.adventure.text.format.TextDecoration.BOLD))
+                                .append(Component.text("\n\n")
+                                    .color(net.kyori.adventure.text.format.NamedTextColor.GRAY))
+                                .append(Component.text("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                                    .color(net.kyori.adventure.text.format.NamedTextColor.GRAY))
+                                .build()
                         ));
                         return;
                     }
@@ -97,7 +142,56 @@ public class LoginListener {
                     if (quarantine.isPresent()) {
                         logger.debug("🚫 {} ({}) is quarantined. Denying login.", username, uuid);
                         String quarantineMessage = discordManager.getQuarantineChecker().formatQuarantineMessage(quarantine.get());
+                        
+                        // Log denied login
+                        if (ipLogger != null) {
+                            ipLogger.logLogin(originalUuid, discordId, ipAddress, false, "Quarantined");
+                        }
+                        
                         event.setResult(ComponentResult.denied(Component.text(quarantineMessage)));
+                        return;
+                    }
+                }
+                
+                // Check ToS acceptance
+                if (tosManager != null && tosManager.isEnforced()) {
+                    if (!tosManager.hasAgreedToCurrentVersion(discordId)) {
+                        logger.info("❌ {} ({}) has not accepted ToS v{}. Denying login.", 
+                            username, originalUuid, tosManager.getCurrentVersion());
+                        
+                        // Log denied login
+                        if (ipLogger != null) {
+                            ipLogger.logLogin(originalUuid, discordId, ipAddress, false, "ToS not accepted");
+                        }
+                        
+                        event.setResult(ComponentResult.denied(
+                            Component.text()
+                                .append(Component.text("⚠  TERMS OF SERVICE UPDATE\n")
+                                    .color(net.kyori.adventure.text.format.NamedTextColor.YELLOW)
+                                    .decorate(net.kyori.adventure.text.format.TextDecoration.BOLD))
+                                .append(Component.text("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
+                                    .color(net.kyori.adventure.text.format.NamedTextColor.GRAY))
+                                .append(Component.text("We have updated our Terms of Service.\n")
+                                    .color(net.kyori.adventure.text.format.NamedTextColor.WHITE))
+                                .append(Component.text("You must accept the new terms to continue playing.\n\n")
+                                    .color(net.kyori.adventure.text.format.NamedTextColor.WHITE))
+                                .append(Component.text("To accept the terms:\n")
+                                    .color(net.kyori.adventure.text.format.NamedTextColor.AQUA))
+                                .append(Component.text("   1. Go to our Discord server\n")
+                                    .color(net.kyori.adventure.text.format.NamedTextColor.GRAY))
+                                .append(Component.text("   2. Run ")
+                                    .color(net.kyori.adventure.text.format.NamedTextColor.GRAY))
+                                .append(Component.text("/tos")
+                                    .color(net.kyori.adventure.text.format.NamedTextColor.GREEN)
+                                    .decorate(net.kyori.adventure.text.format.TextDecoration.BOLD))
+                                .append(Component.text(" in any channel\n")
+                                    .color(net.kyori.adventure.text.format.NamedTextColor.GRAY))
+                                .append(Component.text("   3. Click the 'I Agree' button\n\n")
+                                    .color(net.kyori.adventure.text.format.NamedTextColor.GRAY))
+                                .append(Component.text("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                                    .color(net.kyori.adventure.text.format.NamedTextColor.GRAY))
+                                .build()
+                        ));
                         return;
                     }
                 }
@@ -109,6 +203,12 @@ public class LoginListener {
                 }
 
                 logger.debug("✅ {} ({}) is linked. Allowing login.", username, originalUuid);
+                
+                // Log successful login
+                if (ipLogger != null) {
+                    ipLogger.logLogin(originalUuid, discordId, ipAddress, true, null);
+                }
+                
                 event.setResult(ComponentResult.allowed());
             } else {
                 // Check if they were linked but removed due to leaving Discord
@@ -116,6 +216,12 @@ public class LoginListener {
                 if (discordId != null) {
                     // THIS SHOULD NEVER HAPPEN!
                     logger.warn("🔗 {} ({}) was linked but needs to relink.", username, originalUuid);
+                    
+                    // Log denied login
+                    if (ipLogger != null) {
+                        ipLogger.logLogin(originalUuid, discordId, ipAddress, false, "Account needs relinking");
+                    }
+                    
                     event.setResult(ComponentResult.denied(
                             Component.text("Your Discord account is no longer linked.\n" +
                                     "Please contact an administrator to relink your account.")
@@ -128,15 +234,68 @@ public class LoginListener {
                 database.savePendingCode(originalUuid, code);
 
                 logger.info("❌ {} ({}) is not linked. Generated code: {}", username, originalUuid, code);
+                
+                // Log denied login
+                if (ipLogger != null) {
+                    ipLogger.logLogin(originalUuid, null, ipAddress, false, "Not linked");
+                }
+                
                 event.setResult(ComponentResult.denied(
-                        Component.text("This Minecraft account is not linked.\n" +
-                                "Use code §b" + code + "§r in Discord to link.")
+                    Component.text()
+                        .append(Component.text("⚠  ACCOUNT NOT LINKED\n")
+                            .color(net.kyori.adventure.text.format.NamedTextColor.GOLD)
+                            .decorate(net.kyori.adventure.text.format.TextDecoration.BOLD))
+                        .append(Component.text("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
+                            .color(net.kyori.adventure.text.format.NamedTextColor.GRAY))
+                        .append(Component.text("This Minecraft account must be linked to Discord.\n\n")
+                            .color(net.kyori.adventure.text.format.NamedTextColor.WHITE))
+                        .append(Component.text("Your link code: ")
+                            .color(net.kyori.adventure.text.format.NamedTextColor.YELLOW))
+                        .append(Component.text(code)
+                            .color(net.kyori.adventure.text.format.NamedTextColor.AQUA)
+                            .decorate(net.kyori.adventure.text.format.TextDecoration.BOLD))
+                        .append(Component.text("\n\n🔗 How to link:\n")
+                            .color(net.kyori.adventure.text.format.NamedTextColor.GREEN))
+                        .append(Component.text("   1. Join our Discord server\n")
+                            .color(net.kyori.adventure.text.format.NamedTextColor.GRAY))
+                        .append(Component.text("   2. Run ")
+                            .color(net.kyori.adventure.text.format.NamedTextColor.GRAY))
+                        .append(Component.text("/link " + code)
+                            .color(net.kyori.adventure.text.format.NamedTextColor.GREEN)
+                            .decorate(net.kyori.adventure.text.format.TextDecoration.BOLD))
+                        .append(Component.text(" in any channel\n")
+                            .color(net.kyori.adventure.text.format.NamedTextColor.GRAY))
+                        .append(Component.text("   3. You'll be able to join immediately!\n\n")
+                            .color(net.kyori.adventure.text.format.NamedTextColor.GRAY))
+                        .append(Component.text("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                            .color(net.kyori.adventure.text.format.NamedTextColor.GRAY))
+                        .build()
                 ));
             }
         } catch (Exception e) {
             logger.error("⚠️ Error during login check for {} ({})", username, originalUuid, e);
+            
+            // Log error
+            if (ipLogger != null) {
+                ipLogger.logLogin(originalUuid, null, ipAddress, false, "Server error");
+            }
+            
             event.setResult(ComponentResult.denied(
-                    Component.text("A server error occurred. Try again later.")
+                Component.text()
+                    .append(Component.text("❌  SERVER ERROR\n")
+                        .color(net.kyori.adventure.text.format.NamedTextColor.DARK_RED)
+                        .decorate(net.kyori.adventure.text.format.TextDecoration.BOLD))
+                    .append(Component.text("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
+                        .color(net.kyori.adventure.text.format.NamedTextColor.GRAY))
+                    .append(Component.text("A server error occurred.\n")
+                        .color(net.kyori.adventure.text.format.NamedTextColor.RED))
+                    .append(Component.text("Please try again in a few moments.\n\n")
+                        .color(net.kyori.adventure.text.format.NamedTextColor.WHITE))
+                    .append(Component.text("If this issue persists, please contact an administrator.\n\n")
+                        .color(net.kyori.adventure.text.format.NamedTextColor.GRAY))
+                    .append(Component.text("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                        .color(net.kyori.adventure.text.format.NamedTextColor.GRAY))
+                    .build()
             ));
         }
     }
