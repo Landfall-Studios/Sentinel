@@ -1,0 +1,64 @@
+plugins {
+    id 'java'
+    id 'eclipse'
+    id 'org.jetbrains.gradle.plugin.idea-ext' version '1.1.8'
+    id 'com.github.johnrengelman.shadow' version '8.1.1'
+    id("xyz.jpenilla.run-velocity") version "2.3.1"
+}
+
+group = 'world.landfall'
+version = '1.2.2'
+
+def targetJavaVersion = 17
+
+repositories {
+    mavenCentral()
+    maven {
+        name = "papermc-repo"
+        url = "https://repo.papermc.io/repository/maven-public/"
+    }
+    maven {
+        name = "sonatype"
+        url = "https://oss.sonatype.org/content/groups/public/"
+    }
+}
+
+dependencies {
+    implementation 'world.landfall:sentinel-core'
+
+    compileOnly("com.velocitypowered:velocity-api:3.4.0-SNAPSHOT")
+    annotationProcessor("com.velocitypowered:velocity-api:3.4.0-SNAPSHOT")
+
+    // Shaded dependencies (pulled transitively from core, but need to be in shadow jar)
+    implementation 'com.zaxxer:HikariCP:5.1.0'
+    implementation 'com.google.code.gson:gson:2.10.1'
+    implementation "mysql:mysql-connector-java:8.0.33"
+    implementation 'net.dv8tion:JDA:5.0.0-beta.8'
+}
+
+java {
+    sourceCompatibility = targetJavaVersion
+    targetCompatibility = targetJavaVersion
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.release.set(targetJavaVersion)
+}
+
+shadowJar {
+    archiveClassifier.set('')
+    relocate 'com.zaxxer.hikari', 'world.landfall.sentinel.lib.hikari'
+    relocate 'com.google.gson', 'world.landfall.sentinel.lib.gson'
+    relocate 'com.mysql.cj', 'world.landfall.sentinel.lib.mysql'
+    relocate 'net.dv8tion.jda', 'world.landfall.sentinel.lib.jda'
+}
+
+tasks.build {
+    dependsOn shadowJar
+}
+
+tasks.runVelocity {
+    velocityVersion("3.4.0-SNAPSHOT")
+    pluginJars.setFrom(tasks.named("shadowJar").flatMap { it.archiveFile })
+}
