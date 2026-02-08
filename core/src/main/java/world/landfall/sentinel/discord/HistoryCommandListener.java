@@ -1,5 +1,6 @@
 package world.landfall.sentinel.discord;
 
+import world.landfall.sentinel.context.GamePlatform;
 import world.landfall.sentinel.db.DatabaseManager;
 import world.landfall.sentinel.db.LinkInfo;
 import world.landfall.sentinel.moderation.ModerationManager;
@@ -87,7 +88,7 @@ public class HistoryCommandListener extends ListenerAdapter {
         } else {
             // Look up by Minecraft username
             String mcUsername = minecraftOpt.getAsString();
-            Optional<LinkInfo> linkInfo = db.findByUsername(mcUsername);
+            Optional<LinkInfo> linkInfo = db.findByUsername(mcUsername, GamePlatform.MINECRAFT);
 
             if (linkInfo.isEmpty()) {
                 hook.sendMessage("❌ No linked account found for Minecraft user: " + mcUsername).queue();

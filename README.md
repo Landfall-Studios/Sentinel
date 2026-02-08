@@ -1,115 +1,156 @@
-# Sentinel
+<p align="center">
+  <img src="ICON.png" alt="Sentinel" width="128" />
+</p>
 
-**Sentinel** is a Velocity plugin that securely links Minecraft accounts to Discord accounts. It integrates with a Discord bot to verify players before allowing login, helping to prevent impersonation and aiding in connecting players together. Sentinel also provides quarantine functionality to temporarily restrict access for problematic players.
+<h1 align="center">Sentinel</h1>
 
-## Commands
+<p align="center">
+  A cross-platform Discord account linking and moderation gateway for game servers. Links player accounts to Discord, enforces verification before login, and provides staff moderation tools, all through a shared core that runs on both Velocity (Minecraft) and Hytale.
+</p>
 
-### Discord Commands
-    /link <code>
-    Link your Minecraft account to your Discord account.
+<p align="center">
+  <a href="USAGE.md">Usage Guide</a>
+</p>
 
-    /whois [discord: @user | minecraft: username]
-    Look up linked account info.
+## Architecture
 
-#### `/quarantine`
-**Purpose:** Add a quarantine to a Discord user or show their current quarantine status.
+Sentinel uses a service locator with adapter pattern to run the same login and moderation logic across multiple game platforms. All shared logic lives in `core/` and depends on platform-independent interfaces; platform entry points wire concrete implementations at startup.
 
-**Usage:**
-- **Show status:** `/quarantine @user`
-- **Add permanent quarantine:** `/quarantine @user reason:"Rule violation"`
-- **Add temporary quarantine:** `/quarantine @user duration:2h reason:"Griefing"`
+### Service Locator
 
-**Parameters:**
-- `user` (required): Discord user to quarantine
-- `duration` (optional): Duration in format like `30m`, `2h`, `3d`, `1w`
-- `reason` (optional): Reason for the quarantine
+`SentinelCore.java` holds static references to platform services:
 
-**Duration formats:**
-- `30s` = 30 seconds
-- `15m` = 15 minutes  
-- `2h` = 2 hours
-- `7d` = 7 days
-- `2w` = 2 weeks
+```
+SentinelCore.platform()  -> PlatformAdapter
+SentinelCore.logger()    -> Logger (SLF4J)
+```
 
-**Features:**
-- Automatically kicks online players when quarantined
-- Shows detailed status with colored Discord formatting
-- Tracks creation time and administrator who created it
-- Automatic cleanup of expired quarantines
+### Core Interfaces
 
-#### `/unquarantine`
-**Purpose:** Remove a quarantine from a Discord user.
+All in `world.landfall.sentinel.context`:
 
-**Usage:**
-- `/unquarantine @user`
+| Interface | Purpose |
+|-----------|---------|
+| `PlatformAdapter` | Player lookup, kick, data directory, scheduler |
+| `PlatformPlayer` | Player abstraction (UUID, username, online status) |
+| `PlatformScheduler` | Async task scheduling |
+| `LoginContext` | Login event data (UUID, username, IP, virtual host, platform) |
+| `LoginGatekeeper` | Allow/deny login with platform-specific rendering |
+| `GamePlatform` | Enum: `MINECRAFT`, `HYTALE` |
 
-**Parameters:**
-- `user` (required): Discord user to remove quarantine from
+### Login Flow
 
-**Features:**
-- Shows previous quarantine details when removing
-- Only works if user is currently quarantined
+`LoginHandler` contains all login business logic. Platform listeners extract a `LoginContext` and pass it with a `LoginGatekeeper` to `LoginHandler.handleLogin()`, which runs through:
 
-## Features
+1. Bypass server check (virtual host routing, Velocity only)
+2. Link status check (per-platform via `GamePlatform`)
+3. Discord membership verification
+4. Quarantine check (with automatic expiry cleanup)
+5. ToS acceptance check
+6. Allow or deny via `LoginGatekeeper`
 
-- **Account Linking**: Secure verification system linking Minecraft accounts to Discord
-- **Login Protection**: Prevents unlinked accounts from joining (with configurable bypass servers)
-- **Role Management**: Automatic Discord role assignment for linked players
-- **Quarantine System**: Staff can quarantine problematic players with timed bans, preventing login and kicking online players
-- **Automatic Cleanup**: Removes database entries for users who leave Discord
-- **Rate Limiting**: Respects Discord API limits with intelligent rate limiting
+Denial reasons are modeled as a `DenialReason` sealed interface with typed variants (`NotLinked`, `Quarantined`, `TosNotAccepted`, `DiscordLeft`, `NeedsRelink`, `ServerError`). Each platform's gatekeeper renders these into its native format.
 
-## Requirements
+### Multi-Platform Linking
 
-- Java 17+
-- Velocity Proxy (tested on 3.4.0-SNAPSHOT)
-- MySQL or MariaDB
+One Discord account can link both a Minecraft and a Hytale account. The `linked_accounts` table uses a composite primary key `(uuid, platform)` and composite unique `(discord_id, platform)`.
 
-## Setup
+### Shared Business Logic
 
-1. **Install the plugin**  
-   Place the shaded JAR into your `plugins/` folder on your Velocity proxy.
+| Class | Purpose |
+|-------|---------|
+| `LoginHandler` | Platform-independent login flow (link check, quarantine, ToS, bypass routing) |
+| `DatabaseManager` | HikariCP connection pool, all SQL operations, schema migration |
+| `DiscordManager` | JDA bot lifecycle, slash command registration, event wiring |
+| `LinkCommandListener` | `/link` — claims pending codes, creates account links |
+| `WhoIsCommandListener` | `/whois` — lookup by Discord user, Minecraft username, or Hytale username |
+| `BanCommandListener` | `/ban` — staff ban with quarantine + kick across all platforms |
+| `UnbanCommandListener` | `/unban` — removes bans and quarantines |
+| `WarnCommandListener` | `/warn` — staff warnings |
+| `NoteCommandListener` | `/note` — internal staff notes |
+| `HistoryCommandListener` | `/history` — moderation history lookup |
+| `TosCommandListener` | `/tos` — Terms of Service acceptance (optional) |
+| `ModerationManager` | Audit logging to Discord channel |
+| `RoleManager` | Linked role assignment + bulk sync on startup |
+| `QuarantineChecker` | Quarantine validation + automatic expiry cleanup |
+| `TosManager` | ToS version tracking and enforcement |
+| `ImpersonationManager` | Staff impersonation session tracking |
+| `IpLogger` | Login IP audit trail |
 
-2. **Configure MySQL and Discord**  
-   On first run, `plugins/sentinel/config.json` will be created. Fill in your database credentials, Discord token, and optionally configure quarantine and staff roles:
-   ```json
-   {
-     "mysql": {
-       "host": "localhost",
-       "port": 3306,
-       "database": "sentinel",
-       "username": "sentinel_user",
-       "password": "password"
-     },
-     "discord": {
-       "token": "your_discord_bot_token",
-       "linkedRole": "123456789012345678",
-       "quarantineRole": "987654321098765432",
-       "quarantineMessage": "Your account has been quarantined. Contact an administrator.",
-       "staffRoles": ["111111111111111111", "222222222222222222"]
-     },
-     "bypassServers": {
-       "servers": ["lobby", "auth"]
-     }
-   }
-   ```
+## Platform Implementations
 
-### Configuration Options
+### Velocity / Minecraft (`velocity/`)
 
-- **`bypassServers`**: Server names that bypass Discord verification requirement. Useful for lobbies or auth servers where unverified players should be allowed.
+Built against the Velocity Proxy API. Entry point: `VelocitySentinel` (`@Plugin`).
 
-- **`linkedRole`**: (Optional) Discord role ID automatically assigned to all linked players. When configured:
-  - All existing linked accounts receive the role on bot startup (rate-limited)
-  - New accounts that link immediately receive the role
-  - Role synchronization spreads over ~20 minutes for large databases
+| Class | Implements | Notes |
+|-------|-----------|-------|
+| `VelocityPlatformAdapter` | `PlatformAdapter` | Uses `ProxyServer` API |
+| `VelocityPlayer` | `PlatformPlayer` | Wraps `Player` |
+| `VelocityScheduler` | `PlatformScheduler` | Velocity's async scheduler |
+| `VelocityLoginContext` | `LoginContext` | Wraps `LoginEvent`, platform = `MINECRAFT` |
+| `VelocityLoginGatekeeper` | `LoginGatekeeper` | Renders `DenialReason` to Adventure Components |
+| `VelocityLoginListener` | - | Bridges Velocity login events to `LoginHandler` |
+| `VelocityGameProfileListener` | - | Modifies game profile for impersonation (early event) |
+| `VelocityImpersonateCommand` | - | `/simulacra` command for staff impersonation |
+| `VelocityDisconnectListener` | - | Cleans up impersonation sessions on disconnect |
 
-- **`quarantineRole`**: (Optional) Discord role ID for quarantined players. When configured:
-  - Applied/removed automatically when quarantines are added/removed
-  - Used for Discord channel restrictions and effects
-  - **NOT used for login blocking** - only database quarantines block login
-  - Online players are immediately kicked when quarantined
-  - Supports temporary bans with custom durations and reasons
+### Hytale (`hytale/`)
 
-- **`quarantineMessage`**: Default message shown to quarantined players (overridden by custom quarantine messages with details)
+Built against the Hytale Server API (`com.hypixel.hytale.server`). Entry point: `HytaleSentinel extends JavaPlugin`.
 
-- **`staffRoles`**: Array of Discord role IDs that can use the `/quarantine` command
+| Class | Implements | Notes |
+|-------|-----------|-------|
+| `HytalePlatformAdapter` | `PlatformAdapter` | Uses `Universe` API, Netty for IP addresses |
+| `HytalePlayer` | `PlatformPlayer` | Wraps `PlayerRef` |
+| `HytaleScheduler` | `PlatformScheduler` | Timer-based async scheduling |
+| `HytaleLoginContext` | `LoginContext` | Wraps `PlayerRef`, platform = `HYTALE` |
+| `HytaleLoginGatekeeper` | `LoginGatekeeper` | Renders `DenialReason` as plain ASCII text, kicks after connect |
+| `HytaleLoginListener` | - | Bridges Hytale player connect events to `LoginHandler` |
+| `HytaleDisconnectListener` | - | Cleanup on disconnect |
+| `HytaleLoggerAdapter` | `Logger` (SLF4J) | Adapts Hytale's native logger |
+
+### Hytale Platform Limitations
+
+| Feature | Velocity (Minecraft) | Hytale | Impact |
+|---------|---------------------|--------|--------|
+| Cancel login event | `LoginEvent.setResult()` | Not available | Must kick after connect via `disconnect()` |
+| Rich disconnect messages | Adventure Components (color, formatting, click events) | Plain ASCII text only | No color, no Unicode, no emoji |
+| Bypass server routing | Virtual host matching | Not applicable | Hytale gatekeeper returns `false` for `supportsBypassRouting()` |
+| Impersonation | Full game profile swap | Not implemented | Velocity-only feature |
+
+## Building
+
+Each module is an independent Gradle project. Build from within each directory:
+
+### Core
+
+```bash
+cd core && ./gradlew build
+```
+
+### Velocity
+
+```bash
+cd velocity && ./gradlew build   # Produces shadow jar in build/libs/
+```
+
+### Hytale
+
+Requires a local copy of `HytaleServer.jar`. Set the path in `hytale/gradle.properties`:
+
+```properties
+hytale_server_jar=/path/to/HytaleServer.jar
+```
+
+```bash
+cd hytale && ./gradlew build   # Produces shadow jar in build/libs/
+```
+
+## Adding a New Platform
+
+1. Create a new directory (e.g., `paper/`) with its own `build.gradle`, `settings.gradle` (with `includeBuild '../core'`), and Gradle wrapper.
+2. Create `platform/<name>/` package under `src/main/java/world/landfall/sentinel/`.
+3. Implement: `PlatformAdapter`, `PlatformPlayer`, `PlatformScheduler`, `LoginContext`, `LoginGatekeeper`.
+4. Create an entry point that initializes `SentinelCore`, `DatabaseManager`, `DiscordManager`, `LoginHandler`, and registers event listeners.
+5. Add the new module to the root `settings.gradle` for IDE discovery.

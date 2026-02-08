@@ -8,4 +8,5 @@ public interface LoginContext {
     String getPlayerUsername();
     String getIpAddress();
     Optional<String> getVirtualHost();
+    GamePlatform getPlatform();
 }

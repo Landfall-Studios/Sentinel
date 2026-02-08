@@ -1,6 +1,7 @@
 package world.landfall.sentinel.db;
 
 import world.landfall.sentinel.config.SentinelConfig;
+import world.landfall.sentinel.context.GamePlatform;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import org.slf4j.Logger;
@@ -136,53 +137,6 @@ public class DatabaseManager {
             );
             """;
 
-        // reputation_votes: tracks individual reputation votes between players
-        String createReputationVotes = """
-            CREATE TABLE IF NOT EXISTS reputation_votes (
-              id                BIGINT       AUTO_INCREMENT PRIMARY KEY,
-              voter_discord_id  VARCHAR(32)  NOT NULL,
-              target_discord_id VARCHAR(32)  NOT NULL,
-              vote_value        TINYINT      NOT NULL,
-              comment           TEXT,
-              comment_length    INT          DEFAULT 0,
-              voted_at          TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
-              UNIQUE KEY unique_vote (voter_discord_id, target_discord_id),
-              INDEX idx_target (target_discord_id),
-              INDEX idx_voter (voter_discord_id),
-              INDEX idx_voted_at (voted_at)
-            );
-            """;
-
-        // reputation_cache: stores calculated reputation scores
-        String createReputationCache = """
-            CREATE TABLE IF NOT EXISTS reputation_cache (
-              discord_id        VARCHAR(32)  PRIMARY KEY,
-              total_score       DECIMAL(10,4) DEFAULT 0,
-              display_score     INT           DEFAULT 0,
-              last_calculated   TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP,
-              total_votes_received INT        DEFAULT 0,
-              percentile_rank   DECIMAL(5,2)  DEFAULT 50.0,
-              INDEX idx_display_score (display_score),
-              INDEX idx_percentile (percentile_rank)
-            );
-            """;
-
-        // reputation_voter_stats: tracks per-voter credibility metrics
-        String createReputationVoterStats = """
-            CREATE TABLE IF NOT EXISTS reputation_voter_stats (
-              voter_discord_id      VARCHAR(32)  PRIMARY KEY,
-              account_created_at    TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
-              total_votes_cast      INT          DEFAULT 0,
-              positive_votes_cast   INT          DEFAULT 0,
-              negative_votes_cast   INT          DEFAULT 0,
-              votes_last_24h        INT          DEFAULT 0,
-              last_vote_at          TIMESTAMP    NULL,
-              consensus_agreements  INT          DEFAULT 0,
-              consensus_disagreements INT        DEFAULT 0,
-              credibility_score     DECIMAL(5,4) DEFAULT 1.0
-            );
-            """;
-
         try (Connection conn = dataSource.getConnection();
              Statement st = conn.createStatement()) {
             st.executeUpdate(createLinked);
@@ -192,9 +146,6 @@ public class DatabaseManager {
             st.executeUpdate(createTosVersions);
             st.executeUpdate(createLoginIps);
             st.executeUpdate(createModerationActions);
-            st.executeUpdate(createReputationVotes);
-            st.executeUpdate(createReputationCache);
-            st.executeUpdate(createReputationVoterStats);
 
             // Update existing moderation_actions table to support NOTE and UNBAN
             try {
@@ -215,21 +166,62 @@ public class DatabaseManager {
                 // Column might already exist
                 logger.debug("Could not add duration column to moderation_actions table (may already exist): {}", e.getMessage());
             }
+
+            // Multi-platform linking migration: add platform column to linked_accounts
+            try {
+                st.executeUpdate("ALTER TABLE linked_accounts ADD COLUMN IF NOT EXISTS platform VARCHAR(16) NOT NULL DEFAULT 'MINECRAFT'");
+                logger.info("Added platform column to linked_accounts table.");
+            } catch (SQLException e) {
+                logger.debug("Could not add platform column to linked_accounts (may already exist): {}", e.getMessage());
+            }
+
+            // Migrate linked_accounts PK to composite (uuid, platform)
+            try {
+                st.executeUpdate("ALTER TABLE linked_accounts DROP PRIMARY KEY, ADD PRIMARY KEY (uuid, platform)");
+                logger.info("Migrated linked_accounts primary key to composite (uuid, platform).");
+            } catch (SQLException e) {
+                logger.debug("Could not migrate linked_accounts PK (may already be composite): {}", e.getMessage());
+            }
+
+            // Migrate linked_accounts UNIQUE on discord_id to composite (discord_id, platform)
+            try {
+                st.executeUpdate("ALTER TABLE linked_accounts DROP INDEX discord_id, ADD UNIQUE INDEX uq_discord_platform (discord_id, platform)");
+                logger.info("Migrated linked_accounts discord_id unique to composite (discord_id, platform).");
+            } catch (SQLException e) {
+                logger.debug("Could not migrate linked_accounts discord_id unique (may already be composite): {}", e.getMessage());
+            }
+
+            // Multi-platform linking migration: add platform column to pending_links
+            try {
+                st.executeUpdate("ALTER TABLE pending_links ADD COLUMN IF NOT EXISTS platform VARCHAR(16) NOT NULL DEFAULT 'MINECRAFT'");
+                logger.info("Added platform column to pending_links table.");
+            } catch (SQLException e) {
+                logger.debug("Could not add platform column to pending_links (may already exist): {}", e.getMessage());
+            }
+
+            // Migrate pending_links PK to composite (uuid, platform)
+            try {
+                st.executeUpdate("ALTER TABLE pending_links DROP PRIMARY KEY, ADD PRIMARY KEY (uuid, platform)");
+                logger.info("Migrated pending_links primary key to composite (uuid, platform).");
+            } catch (SQLException e) {
+                logger.debug("Could not migrate pending_links PK (may already be composite): {}", e.getMessage());
+            }
         } catch (SQLException e) {
             logger.error("Failed to init DB tables", e);
         }
     }
 
-    public boolean isLinked(UUID uuid) {
-        String query = "SELECT 1 FROM linked_accounts WHERE uuid = ?";
+    public boolean isLinked(UUID uuid, GamePlatform platform) {
+        String query = "SELECT 1 FROM linked_accounts WHERE uuid = ? AND platform = ?";
         try (Connection conn = dataSource.getConnection();
              PreparedStatement ps = conn.prepareStatement(query)) {
             ps.setString(1, uuid.toString());
+            ps.setString(2, platform.name());
             try (ResultSet rs = ps.executeQuery()) {
                 return rs.next();
             }
         } catch (SQLException e) {
-            logger.error("Failed to check linked status for UUID: {}", uuid, e);
+            logger.error("Failed to check linked status for UUID: {} platform: {}", uuid, platform, e);
             return false;
         }
     }
@@ -237,25 +229,26 @@ public class DatabaseManager {
     /**
      * Cache or update the player's last-seen username.
      */
-    public void updateUsername(UUID uuid, String username) {
-        String sql = "UPDATE linked_accounts SET username = ? WHERE uuid = ?";
+    public void updateUsername(UUID uuid, String username, GamePlatform platform) {
+        String sql = "UPDATE linked_accounts SET username = ? WHERE uuid = ? AND platform = ?";
         try (Connection conn = dataSource.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setString(1, username);
             ps.setString(2, uuid.toString());
+            ps.setString(3, platform.name());
             ps.executeUpdate();
         } catch (SQLException e) {
-            logger.warn("Could not update username for {}", uuid, e);
+            logger.warn("Could not update username for {} on {}", uuid, platform, e);
         }
     }
 
     /**
-     * Inserts or rotates the pending link code for this UUID.
+     * Inserts or rotates the pending link code for this UUID and platform.
      */
-    public void savePendingCode(UUID uuid, String code) {
+    public void savePendingCode(UUID uuid, String code, GamePlatform platform) {
         String sql = """
-            INSERT INTO pending_links (uuid, code, created_at)
-            VALUES (?, ?, ?)
+            INSERT INTO pending_links (uuid, code, created_at, platform)
+            VALUES (?, ?, ?, ?)
             ON DUPLICATE KEY UPDATE
               code = VALUES(code),
               created_at = VALUES(created_at)
@@ -265,37 +258,52 @@ public class DatabaseManager {
             ps.setString(1, uuid.toString());
             ps.setString(2, code);
             ps.setTimestamp(3, Timestamp.from(Instant.now()));
+            ps.setString(4, platform.name());
             ps.executeUpdate();
         } catch (SQLException e) {
-            logger.error("Failed to store pending link for {}", uuid, e);
+            logger.error("Failed to store pending link for {} on {}", uuid, platform, e);
         }
     }
 
     /**
      * Atomically claims a pending link code:
-     *  - looks up the UUID by code
+     *  - looks up the UUID and platform by code (with row lock)
      *  - deletes that pending row
-     *  - returns the claimed UUID (or null if none)
+     *  - returns the claimed PendingClaim (or null if none)
+     *
+     * Uses a transaction with SELECT ... FOR UPDATE to prevent two concurrent
+     * /link calls from both claiming the same code.
      */
-    public UUID claimPending(String code) {
-        String select = "SELECT uuid FROM pending_links WHERE code = ?";
+    public PendingClaim claimPending(String code) {
+        String select = "SELECT uuid, platform FROM pending_links WHERE code = ? FOR UPDATE";
         String delete = "DELETE FROM pending_links WHERE code = ?";
         try (Connection conn = dataSource.getConnection()) {
-            // lookup
-            try (PreparedStatement ps = conn.prepareStatement(select)) {
-                ps.setString(1, code);
-                try (ResultSet rs = ps.executeQuery()) {
-                    if (!rs.next()) {
-                        return null;
+            conn.setAutoCommit(false);
+            try {
+                UUID uuid;
+                GamePlatform platform;
+                try (PreparedStatement ps = conn.prepareStatement(select)) {
+                    ps.setString(1, code);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        if (!rs.next()) {
+                            conn.rollback();
+                            return null;
+                        }
+                        uuid = UUID.fromString(rs.getString("uuid"));
+                        platform = GamePlatform.valueOf(rs.getString("platform"));
                     }
-                    UUID uuid = UUID.fromString(rs.getString("uuid"));
-                    // delete
-                    try (PreparedStatement del = conn.prepareStatement(delete)) {
-                        del.setString(1, code);
-                        del.executeUpdate();
-                    }
-                    return uuid;
                 }
+                try (PreparedStatement del = conn.prepareStatement(delete)) {
+                    del.setString(1, code);
+                    del.executeUpdate();
+                }
+                conn.commit();
+                return new PendingClaim(uuid, platform);
+            } catch (SQLException e) {
+                conn.rollback();
+                throw e;
+            } finally {
+                conn.setAutoCommit(true);
             }
         } catch (SQLException e) {
             logger.error("Failed to claim pending code {}", code, e);
@@ -304,56 +312,74 @@ public class DatabaseManager {
     }
 
     /**
-     * Attempts to insert into linked_accounts.
-     * Returns false if the Discord ID is already linked, true otherwise.
+     * Attempts to insert into linked_accounts for the given platform.
+     * Returns false if the Discord ID is already linked on this platform, true otherwise.
+     *
+     * Uses a transaction to prevent two concurrent calls from both passing
+     * the duplicate check and inserting.
      */
-    public boolean addLink(UUID uuid, String discordId) {
-        String check  = "SELECT 1 FROM linked_accounts WHERE discord_id = ?";
-        String insert = "INSERT INTO linked_accounts (uuid, discord_id) VALUES (?, ?)";
+    public boolean addLink(UUID uuid, String discordId, GamePlatform platform) {
+        String check  = "SELECT 1 FROM linked_accounts WHERE discord_id = ? AND platform = ? FOR UPDATE";
+        String insert = "INSERT INTO linked_accounts (uuid, discord_id, platform) VALUES (?, ?, ?)";
         try (Connection conn = dataSource.getConnection()) {
-            // ensure this Discord ID isn't already linked
-            try (PreparedStatement ps = conn.prepareStatement(check)) {
-                ps.setString(1, discordId);
-                try (ResultSet rs = ps.executeQuery()) {
-                    if (rs.next()) {
-                        return false;
+            conn.setAutoCommit(false);
+            try {
+                // ensure this Discord ID isn't already linked on this platform
+                try (PreparedStatement ps = conn.prepareStatement(check)) {
+                    ps.setString(1, discordId);
+                    ps.setString(2, platform.name());
+                    try (ResultSet rs = ps.executeQuery()) {
+                        if (rs.next()) {
+                            conn.rollback();
+                            return false;
+                        }
                     }
                 }
+                // insert new link
+                try (PreparedStatement ps2 = conn.prepareStatement(insert)) {
+                    ps2.setString(1, uuid.toString());
+                    ps2.setString(2, discordId);
+                    ps2.setString(3, platform.name());
+                    ps2.executeUpdate();
+                }
+                conn.commit();
+                return true;
+            } catch (SQLException e) {
+                conn.rollback();
+                throw e;
+            } finally {
+                conn.setAutoCommit(true);
             }
-            // insert new link
-            try (PreparedStatement ps2 = conn.prepareStatement(insert)) {
-                ps2.setString(1, uuid.toString());
-                ps2.setString(2, discordId);
-                ps2.executeUpdate();
-            }
-            return true;
         } catch (SQLException e) {
-            logger.error("Failed to add link {} ↔ {}", uuid, discordId, e);
+            logger.error("Failed to add link {} ↔ {} on {}", uuid, discordId, platform, e);
             return false;
         }
     }
 
-    public Optional<LinkInfo> findByDiscordId(String discordId) {
-        String sql = "SELECT uuid, discord_id, username FROM linked_accounts WHERE discord_id = ?";
+    public List<LinkInfo> findByDiscordId(String discordId) {
+        String sql = "SELECT uuid, discord_id, username, platform FROM linked_accounts WHERE discord_id = ?";
+        List<LinkInfo> links = new ArrayList<>();
         try (Connection c = dataSource.getConnection();
              PreparedStatement ps = c.prepareStatement(sql)) {
             ps.setString(1, discordId);
             try (ResultSet rs = ps.executeQuery()) {
-                if (!rs.next()) return Optional.empty();
-                return Optional.of(new LinkInfo(
-                        UUID.fromString(rs.getString("uuid")),
-                        rs.getString("discord_id"),
-                        rs.getString("username")
-                ));
+                while (rs.next()) {
+                    links.add(new LinkInfo(
+                            UUID.fromString(rs.getString("uuid")),
+                            rs.getString("discord_id"),
+                            rs.getString("username"),
+                            GamePlatform.valueOf(rs.getString("platform"))
+                    ));
+                }
             }
         } catch (SQLException e) {
             logger.error("Error looking up by Discord ID {}", discordId, e);
-            return Optional.empty();
         }
+        return links;
     }
 
     public Optional<LinkInfo> findByUsername(String username) {
-        String sql = "SELECT uuid, discord_id, username FROM linked_accounts WHERE username = ?";
+        String sql = "SELECT uuid, discord_id, username, platform FROM linked_accounts WHERE username = ?";
         try (Connection c = dataSource.getConnection();
              PreparedStatement ps = c.prepareStatement(sql)) {
             ps.setString(1, username);
@@ -362,11 +388,33 @@ public class DatabaseManager {
                 return Optional.of(new LinkInfo(
                         UUID.fromString(rs.getString("uuid")),
                         rs.getString("discord_id"),
-                        rs.getString("username")
+                        rs.getString("username"),
+                        GamePlatform.valueOf(rs.getString("platform"))
                 ));
             }
         } catch (SQLException e) {
             logger.error("Error looking up by username {}", username, e);
+            return Optional.empty();
+        }
+    }
+
+    public Optional<LinkInfo> findByUsername(String username, GamePlatform platform) {
+        String sql = "SELECT uuid, discord_id, username, platform FROM linked_accounts WHERE username = ? AND platform = ?";
+        try (Connection c = dataSource.getConnection();
+             PreparedStatement ps = c.prepareStatement(sql)) {
+            ps.setString(1, username);
+            ps.setString(2, platform.name());
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return Optional.empty();
+                return Optional.of(new LinkInfo(
+                        UUID.fromString(rs.getString("uuid")),
+                        rs.getString("discord_id"),
+                        rs.getString("username"),
+                        GamePlatform.valueOf(rs.getString("platform"))
+                ));
+            }
+        } catch (SQLException e) {
+            logger.error("Error looking up by username {} on {}", username, platform, e);
             return Optional.empty();
         }
     }
@@ -376,7 +424,7 @@ public class DatabaseManager {
      * Returns a list of all Discord IDs that should have the linked role.
      */
     public List<String> getAllLinkedDiscordIds() {
-        String sql = "SELECT discord_id FROM linked_accounts";
+        String sql = "SELECT DISTINCT discord_id FROM linked_accounts";
         List<String> discordIds = new ArrayList<>();
         try (Connection c = dataSource.getConnection();
              PreparedStatement ps = c.prepareStatement(sql);
@@ -418,21 +466,22 @@ public class DatabaseManager {
     }
 
     /**
-     * Gets the Discord ID for a linked UUID.
-     * Returns null if the UUID is not linked.
+     * Gets the Discord ID for a linked UUID on a specific platform.
+     * Returns null if the UUID is not linked on that platform.
      */
-    public String getDiscordId(UUID uuid) {
-        String sql = "SELECT discord_id FROM linked_accounts WHERE uuid = ?";
+    public String getDiscordId(UUID uuid, GamePlatform platform) {
+        String sql = "SELECT discord_id FROM linked_accounts WHERE uuid = ? AND platform = ?";
         try (Connection c = dataSource.getConnection();
              PreparedStatement ps = c.prepareStatement(sql)) {
             ps.setString(1, uuid.toString());
+            ps.setString(2, platform.name());
             try (ResultSet rs = ps.executeQuery()) {
                 if (rs.next()) {
                     return rs.getString("discord_id");
                 }
             }
         } catch (SQLException e) {
-            logger.error("Error getting Discord ID for UUID {}", uuid, e);
+            logger.error("Error getting Discord ID for UUID {} on {}", uuid, platform, e);
         }
         return null;
     }
@@ -497,11 +546,23 @@ public class DatabaseManager {
 
     /**
      * Gets an active quarantine record for a Discord ID.
+     * Returns empty if no quarantine exists or if it has expired.
      *
      * @param discordId The Discord ID to check
-     * @return QuarantineInfo if quarantined and active, null otherwise
+     * @return QuarantineInfo if quarantined and active, empty otherwise
      */
     public Optional<QuarantineInfo> getActiveQuarantine(String discordId) {
+        return getRawQuarantine(discordId).filter(QuarantineInfo::isActive);
+    }
+
+    /**
+     * Gets the quarantine record for a Discord ID regardless of expiry status.
+     * Used by cleanup routines that need to find and remove expired quarantines.
+     *
+     * @param discordId The Discord ID to check
+     * @return QuarantineInfo if any quarantine row exists, empty otherwise
+     */
+    public Optional<QuarantineInfo> getRawQuarantine(String discordId) {
         String sql = "SELECT discord_id, reason, expires_at, created_at, created_by FROM quarantines WHERE discord_id = ?";
         try (Connection c = dataSource.getConnection();
              PreparedStatement ps = c.prepareStatement(sql)) {
@@ -514,16 +575,13 @@ public class DatabaseManager {
                 Timestamp expiresAtTs = rs.getTimestamp("expires_at");
                 Instant expiresAt = expiresAtTs != null ? expiresAtTs.toInstant() : null;
 
-                QuarantineInfo info = new QuarantineInfo(
+                return Optional.of(new QuarantineInfo(
                     rs.getString("discord_id"),
                     rs.getString("reason"),
                     expiresAt,
                     rs.getTimestamp("created_at").toInstant(),
                     rs.getString("created_by")
-                );
-
-                // Return only if still active
-                return info.isActive() ? Optional.of(info) : Optional.empty();
+                ));
             }
         } catch (SQLException e) {
             logger.error("Error getting quarantine for Discord ID {}", discordId, e);
@@ -841,412 +899,6 @@ public class DatabaseManager {
         return ips;
     }
 
-    // ==================== REPUTATION SYSTEM METHODS ====================
-
-    /**
-     * Adds or updates a reputation vote.
-     * Uses ON DUPLICATE KEY UPDATE to replace existing votes from the same voter.
-     *
-     * @param voterDiscordId The Discord ID of the voter
-     * @param targetDiscordId The Discord ID of the target
-     * @param voteValue +1 or -1
-     * @param comment Optional comment (nullable)
-     * @return true if successful
-     */
-    public boolean addOrUpdateVote(String voterDiscordId, String targetDiscordId, int voteValue, String comment) {
-        String sql = """
-            INSERT INTO reputation_votes (voter_discord_id, target_discord_id, vote_value, comment, comment_length, voted_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON DUPLICATE KEY UPDATE
-              vote_value = VALUES(vote_value),
-              comment = VALUES(comment),
-              comment_length = VALUES(comment_length),
-              voted_at = VALUES(voted_at)
-            """;
-
-        try (Connection c = dataSource.getConnection();
-             PreparedStatement ps = c.prepareStatement(sql)) {
-            ps.setString(1, voterDiscordId);
-            ps.setString(2, targetDiscordId);
-            ps.setInt(3, voteValue);
-
-            if (comment != null && !comment.isEmpty()) {
-                ps.setString(4, comment);
-                ps.setInt(5, comment.length());
-            } else {
-                ps.setNull(4, Types.VARCHAR);
-                ps.setInt(5, 0);
-            }
-
-            ps.setTimestamp(6, Timestamp.from(Instant.now()));
-
-            int rowsAffected = ps.executeUpdate();
-            return rowsAffected > 0;
-        } catch (SQLException e) {
-            logger.error("Error adding/updating vote from {} to {}", voterDiscordId, targetDiscordId, e);
-            return false;
-        }
-    }
-
-    /**
-     * Gets all votes for a target user.
-     *
-     * @param targetDiscordId The Discord ID of the target
-     * @return List of votes
-     */
-    public List<ReputationVote> getVotesForTarget(String targetDiscordId) {
-        String sql = """
-            SELECT id, voter_discord_id, target_discord_id, vote_value, comment, comment_length, voted_at
-            FROM reputation_votes
-            WHERE target_discord_id = ?
-            ORDER BY voted_at DESC
-            """;
-
-        List<ReputationVote> votes = new ArrayList<>();
-        try (Connection c = dataSource.getConnection();
-             PreparedStatement ps = c.prepareStatement(sql)) {
-            ps.setString(1, targetDiscordId);
-
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    votes.add(new ReputationVote(
-                        rs.getLong("id"),
-                        rs.getString("voter_discord_id"),
-                        rs.getString("target_discord_id"),
-                        rs.getInt("vote_value"),
-                        rs.getString("comment"),
-                        rs.getInt("comment_length"),
-                        rs.getTimestamp("voted_at").toInstant()
-                    ));
-                }
-            }
-        } catch (SQLException e) {
-            logger.error("Error getting votes for target {}", targetDiscordId, e);
-        }
-
-        return votes;
-    }
-
-    /**
-     * Gets a specific vote between voter and target.
-     *
-     * @param voterDiscordId The voter's Discord ID
-     * @param targetDiscordId The target's Discord ID
-     * @return The vote if exists, empty otherwise
-     */
-    public Optional<ReputationVote> getVoteByVoterAndTarget(String voterDiscordId, String targetDiscordId) {
-        String sql = """
-            SELECT id, voter_discord_id, target_discord_id, vote_value, comment, comment_length, voted_at
-            FROM reputation_votes
-            WHERE voter_discord_id = ? AND target_discord_id = ?
-            """;
-
-        try (Connection c = dataSource.getConnection();
-             PreparedStatement ps = c.prepareStatement(sql)) {
-            ps.setString(1, voterDiscordId);
-            ps.setString(2, targetDiscordId);
-
-            try (ResultSet rs = ps.executeQuery()) {
-                if (rs.next()) {
-                    return Optional.of(new ReputationVote(
-                        rs.getLong("id"),
-                        rs.getString("voter_discord_id"),
-                        rs.getString("target_discord_id"),
-                        rs.getInt("vote_value"),
-                        rs.getString("comment"),
-                        rs.getInt("comment_length"),
-                        rs.getTimestamp("voted_at").toInstant()
-                    ));
-                }
-            }
-        } catch (SQLException e) {
-            logger.error("Error getting vote from {} to {}", voterDiscordId, targetDiscordId, e);
-        }
-
-        return Optional.empty();
-    }
-
-    /**
-     * Gets recent votes for a target (for display purposes).
-     *
-     * @param targetDiscordId The target's Discord ID
-     * @param limit Maximum number of votes to return
-     * @return List of recent votes
-     */
-    public List<ReputationVote> getRecentVotes(String targetDiscordId, int limit) {
-        String sql = """
-            SELECT id, voter_discord_id, target_discord_id, vote_value, comment, comment_length, voted_at
-            FROM reputation_votes
-            WHERE target_discord_id = ?
-            ORDER BY voted_at DESC
-            LIMIT ?
-            """;
-
-        List<ReputationVote> votes = new ArrayList<>();
-        try (Connection c = dataSource.getConnection();
-             PreparedStatement ps = c.prepareStatement(sql)) {
-            ps.setString(1, targetDiscordId);
-            ps.setInt(2, limit);
-
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    votes.add(new ReputationVote(
-                        rs.getLong("id"),
-                        rs.getString("voter_discord_id"),
-                        rs.getString("target_discord_id"),
-                        rs.getInt("vote_value"),
-                        rs.getString("comment"),
-                        rs.getInt("comment_length"),
-                        rs.getTimestamp("voted_at").toInstant()
-                    ));
-                }
-            }
-        } catch (SQLException e) {
-            logger.error("Error getting recent votes for {}", targetDiscordId, e);
-        }
-
-        return votes;
-    }
-
-    /**
-     * Gets votes cast within a specific timeframe (for anti-abuse detection).
-     *
-     * @param voterDiscordId The voter's Discord ID
-     * @param since Only get votes after this time
-     * @return List of votes
-     */
-    public List<ReputationVote> getVotesInTimeframe(String voterDiscordId, Instant since) {
-        String sql = """
-            SELECT id, voter_discord_id, target_discord_id, vote_value, comment, comment_length, voted_at
-            FROM reputation_votes
-            WHERE voter_discord_id = ? AND voted_at >= ?
-            ORDER BY voted_at DESC
-            """;
-
-        List<ReputationVote> votes = new ArrayList<>();
-        try (Connection c = dataSource.getConnection();
-             PreparedStatement ps = c.prepareStatement(sql)) {
-            ps.setString(1, voterDiscordId);
-            ps.setTimestamp(2, Timestamp.from(since));
-
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    votes.add(new ReputationVote(
-                        rs.getLong("id"),
-                        rs.getString("voter_discord_id"),
-                        rs.getString("target_discord_id"),
-                        rs.getInt("vote_value"),
-                        rs.getString("comment"),
-                        rs.getInt("comment_length"),
-                        rs.getTimestamp("voted_at").toInstant()
-                    ));
-                }
-            }
-        } catch (SQLException e) {
-            logger.error("Error getting votes in timeframe for {}", voterDiscordId, e);
-        }
-
-        return votes;
-    }
-
-    /**
-     * Updates voter statistics.
-     *
-     * @param stats The voter statistics to update
-     * @return true if successful
-     */
-    public boolean updateVoterStats(ReputationVoterStats stats) {
-        String sql = """
-            INSERT INTO reputation_voter_stats
-            (voter_discord_id, account_created_at, total_votes_cast, positive_votes_cast, negative_votes_cast,
-             votes_last_24h, last_vote_at, consensus_agreements, consensus_disagreements, credibility_score)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON DUPLICATE KEY UPDATE
-              total_votes_cast = VALUES(total_votes_cast),
-              positive_votes_cast = VALUES(positive_votes_cast),
-              negative_votes_cast = VALUES(negative_votes_cast),
-              votes_last_24h = VALUES(votes_last_24h),
-              last_vote_at = VALUES(last_vote_at),
-              consensus_agreements = VALUES(consensus_agreements),
-              consensus_disagreements = VALUES(consensus_disagreements),
-              credibility_score = VALUES(credibility_score)
-            """;
-
-        try (Connection c = dataSource.getConnection();
-             PreparedStatement ps = c.prepareStatement(sql)) {
-            ps.setString(1, stats.voterDiscordId());
-            ps.setTimestamp(2, Timestamp.from(stats.accountCreatedAt()));
-            ps.setInt(3, stats.totalVotesCast());
-            ps.setInt(4, stats.positiveVotesCast());
-            ps.setInt(5, stats.negativeVotesCast());
-            ps.setInt(6, stats.votesLast24h());
-
-            if (stats.lastVoteAt() != null) {
-                ps.setTimestamp(7, Timestamp.from(stats.lastVoteAt()));
-            } else {
-                ps.setNull(7, Types.TIMESTAMP);
-            }
-
-            ps.setInt(8, stats.consensusAgreements());
-            ps.setInt(9, stats.consensusDisagreements());
-            ps.setDouble(10, stats.credibilityScore());
-
-            int rowsAffected = ps.executeUpdate();
-            return rowsAffected > 0;
-        } catch (SQLException e) {
-            logger.error("Error updating voter stats for {}", stats.voterDiscordId(), e);
-            return false;
-        }
-    }
-
-    /**
-     * Gets voter statistics.
-     *
-     * @param voterDiscordId The voter's Discord ID
-     * @return Voter statistics if exists, empty otherwise
-     */
-    public Optional<ReputationVoterStats> getVoterStats(String voterDiscordId) {
-        String sql = """
-            SELECT voter_discord_id, account_created_at, total_votes_cast, positive_votes_cast, negative_votes_cast,
-                   votes_last_24h, last_vote_at, consensus_agreements, consensus_disagreements, credibility_score
-            FROM reputation_voter_stats
-            WHERE voter_discord_id = ?
-            """;
-
-        try (Connection c = dataSource.getConnection();
-             PreparedStatement ps = c.prepareStatement(sql)) {
-            ps.setString(1, voterDiscordId);
-
-            try (ResultSet rs = ps.executeQuery()) {
-                if (rs.next()) {
-                    Timestamp lastVoteTs = rs.getTimestamp("last_vote_at");
-                    return Optional.of(new ReputationVoterStats(
-                        rs.getString("voter_discord_id"),
-                        rs.getTimestamp("account_created_at").toInstant(),
-                        rs.getInt("total_votes_cast"),
-                        rs.getInt("positive_votes_cast"),
-                        rs.getInt("negative_votes_cast"),
-                        rs.getInt("votes_last_24h"),
-                        lastVoteTs != null ? lastVoteTs.toInstant() : null,
-                        rs.getInt("consensus_agreements"),
-                        rs.getInt("consensus_disagreements"),
-                        rs.getDouble("credibility_score")
-                    ));
-                }
-            }
-        } catch (SQLException e) {
-            logger.error("Error getting voter stats for {}", voterDiscordId, e);
-        }
-
-        return Optional.empty();
-    }
-
-    /**
-     * Updates reputation cache for a user.
-     *
-     * @param cache The reputation cache to update
-     * @return true if successful
-     */
-    public boolean updateReputationCache(ReputationCache cache) {
-        String sql = """
-            INSERT INTO reputation_cache
-            (discord_id, total_score, display_score, last_calculated, total_votes_received, percentile_rank)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON DUPLICATE KEY UPDATE
-              total_score = VALUES(total_score),
-              display_score = VALUES(display_score),
-              last_calculated = VALUES(last_calculated),
-              total_votes_received = VALUES(total_votes_received),
-              percentile_rank = VALUES(percentile_rank)
-            """;
-
-        try (Connection c = dataSource.getConnection();
-             PreparedStatement ps = c.prepareStatement(sql)) {
-            ps.setString(1, cache.discordId());
-            ps.setDouble(2, cache.totalScore());
-            ps.setInt(3, cache.displayScore());
-            ps.setTimestamp(4, Timestamp.from(cache.lastCalculated()));
-            ps.setInt(5, cache.totalVotesReceived());
-            ps.setDouble(6, cache.percentileRank());
-
-            int rowsAffected = ps.executeUpdate();
-            return rowsAffected > 0;
-        } catch (SQLException e) {
-            logger.error("Error updating reputation cache for {}", cache.discordId(), e);
-            return false;
-        }
-    }
-
-    /**
-     * Gets reputation cache for a user.
-     *
-     * @param discordId The user's Discord ID
-     * @return Reputation cache if exists, empty otherwise
-     */
-    public Optional<ReputationCache> getReputationCache(String discordId) {
-        String sql = """
-            SELECT discord_id, total_score, display_score, last_calculated, total_votes_received, percentile_rank
-            FROM reputation_cache
-            WHERE discord_id = ?
-            """;
-
-        try (Connection c = dataSource.getConnection();
-             PreparedStatement ps = c.prepareStatement(sql)) {
-            ps.setString(1, discordId);
-
-            try (ResultSet rs = ps.executeQuery()) {
-                if (rs.next()) {
-                    return Optional.of(new ReputationCache(
-                        rs.getString("discord_id"),
-                        rs.getDouble("total_score"),
-                        rs.getInt("display_score"),
-                        rs.getTimestamp("last_calculated").toInstant(),
-                        rs.getInt("total_votes_received"),
-                        rs.getDouble("percentile_rank")
-                    ));
-                }
-            }
-        } catch (SQLException e) {
-            logger.error("Error getting reputation cache for {}", discordId, e);
-        }
-
-        return Optional.empty();
-    }
-
-    /**
-     * Gets all reputation scores for percentile calculation.
-     *
-     * @return List of all reputation scores
-     */
-    public List<ReputationCache> getAllReputationScores() {
-        String sql = """
-            SELECT discord_id, total_score, display_score, last_calculated, total_votes_received, percentile_rank
-            FROM reputation_cache
-            ORDER BY display_score DESC
-            """;
-
-        List<ReputationCache> scores = new ArrayList<>();
-        try (Connection c = dataSource.getConnection();
-             PreparedStatement ps = c.prepareStatement(sql);
-             ResultSet rs = ps.executeQuery()) {
-
-            while (rs.next()) {
-                scores.add(new ReputationCache(
-                    rs.getString("discord_id"),
-                    rs.getDouble("total_score"),
-                    rs.getInt("display_score"),
-                    rs.getTimestamp("last_calculated").toInstant(),
-                    rs.getInt("total_votes_received"),
-                    rs.getDouble("percentile_rank")
-                ));
-            }
-        } catch (SQLException e) {
-            logger.error("Error getting all reputation scores", e);
-        }
-
-        return scores;
-    }
-
     public void close() {
         dataSource.close();
     }
@@ -1395,6 +1047,11 @@ public class DatabaseManager {
     }
 
     /**
+     * Record for a claimed pending link, including the platform it was created from.
+     */
+    public record PendingClaim(UUID uuid, GamePlatform platform) {}
+
+    /**
      * Record class for login IP information.
      */
     public record LoginIpInfo(String ipAddress, Instant loginTime, boolean allowed, String denyReason) {}
@@ -1413,44 +1070,4 @@ public class DatabaseManager {
         String duration
     ) {}
 
-    /**
-     * Record class for reputation votes.
-     */
-    public record ReputationVote(
-        long id,
-        String voterDiscordId,
-        String targetDiscordId,
-        int voteValue,
-        String comment,
-        int commentLength,
-        Instant votedAt
-    ) {}
-
-    /**
-     * Record class for reputation cache.
-     */
-    public record ReputationCache(
-        String discordId,
-        double totalScore,
-        int displayScore,
-        Instant lastCalculated,
-        int totalVotesReceived,
-        double percentileRank
-    ) {}
-
-    /**
-     * Record class for reputation voter statistics.
-     */
-    public record ReputationVoterStats(
-        String voterDiscordId,
-        Instant accountCreatedAt,
-        int totalVotesCast,
-        int positiveVotesCast,
-        int negativeVotesCast,
-        int votesLast24h,
-        Instant lastVoteAt,
-        int consensusAgreements,
-        int consensusDisagreements,
-        double credibilityScore
-    ) {}
 }

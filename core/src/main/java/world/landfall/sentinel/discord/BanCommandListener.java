@@ -22,6 +22,7 @@ import org.slf4j.Logger;
 
 import javax.annotation.Nonnull;
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -267,18 +268,20 @@ public class BanCommandListener extends ListenerAdapter {
     }
 
     /**
-     * Kicks a player from the proxy if they are currently online.
+     * Kicks a player from all linked platforms if they are currently online.
      */
     private void kickPlayerIfOnline(String discordId, String discordUsername, String reason) {
         try {
-            Optional<LinkInfo> linkInfo = db.findByDiscordId(discordId);
-            if (linkInfo.isEmpty()) {
-                logger.debug("No linked account found for Discord ID {} when trying to kick", discordId);
+            List<LinkInfo> links = db.findByDiscordId(discordId);
+            if (links.isEmpty()) {
+                logger.debug("No linked accounts found for Discord ID {} when trying to kick", discordId);
                 return;
             }
 
-            platformAdapter.kickPlayer(linkInfo.get().uuid(), "BANNED FROM SERVER\n\nReason: " + reason);
-            logger.info("Kicked player {} from server due to ban", linkInfo.get().uuid());
+            for (LinkInfo link : links) {
+                platformAdapter.kickPlayer(link.uuid(), "BANNED FROM SERVER\n\nReason: " + reason);
+                logger.info("Kicked player {} ({}) from server due to ban", link.uuid(), link.platform().displayName());
+            }
         } catch (Exception e) {
             logger.error("Error while trying to kick banned player with Discord ID {}", discordId, e);
         }

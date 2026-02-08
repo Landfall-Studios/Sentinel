@@ -250,15 +250,15 @@ public class QuarantineChecker {
         }
 
         try {
-            // Check if this user has an expired quarantine
-            Optional<QuarantineInfo> quarantine = database.getActiveQuarantine(discordId);
+            // Get the raw quarantine row (regardless of expiry status)
+            Optional<QuarantineInfo> quarantine = database.getRawQuarantine(discordId);
             if (quarantine.isEmpty()) {
-                return false; // No quarantine found
+                return false; // No quarantine row at all
             }
 
             QuarantineInfo info = quarantine.get();
             if (info.isPermanent() || info.isActive()) {
-                return false; // Not expired, no cleanup needed
+                return false; // Still active, no cleanup needed
             }
 
             // Quarantine has expired, clean it up immediately

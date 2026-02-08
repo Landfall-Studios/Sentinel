@@ -1,0 +1,6 @@
+{
+  "Group": "Landfall",
+  "Name": "Sentinel",
+  "Version": "${version}",
+  "Main": "world.landfall.sentinel.platform.hytale.HytaleSentinel"
+}

@@ -1,6 +1,7 @@
 package world.landfall.sentinel.discord;
 
 import world.landfall.sentinel.db.DatabaseManager;
+import world.landfall.sentinel.db.DatabaseManager.PendingClaim;
 import world.landfall.sentinel.tos.TosManager;
 import net.dv8tion.jda.api.hooks.ListenerAdapter;
 import net.dv8tion.jda.api.interactions.InteractionHook;
@@ -77,13 +78,14 @@ public class LinkCommandListener extends ListenerAdapter {
         }
 
         // nowwww do the db work
-        UUID uuid = db.claimPending(code);
-        if (uuid == null) {
+        PendingClaim claim = db.claimPending(code);
+        if (claim == null) {
             hook.sendMessage("❌ Invalid or expired code.").queue();
             return;
         }
-        if (!db.addLink(uuid, evt.getUser().getId())) {
-            hook.sendMessage("❌ This Discord account is already linked!").queue();
+        UUID uuid = claim.uuid();
+        if (!db.addLink(uuid, evt.getUser().getId(), claim.platform())) {
+            hook.sendMessage("❌ This Discord account is already linked on " + claim.platform().displayName() + "!").queue();
             return;
         }
 
@@ -92,25 +94,28 @@ public class LinkCommandListener extends ListenerAdapter {
             roleManager.addRoleToLinkedPlayer(evt.getUser().getId());
         }
 
+        String platformName = claim.platform().displayName();
+        String successMsg = "✅ Your **" + platformName + "** account has been linked!";
+
         // Check if ToS acceptance is required
         if (tosManager != null && tosManager.isEnforced() && tosCommandListener != null) {
             // Check if they've already agreed to current ToS
             if (!tosManager.hasAgreedToCurrentVersion(evt.getUser().getId())) {
                 // Show ToS prompt
-                hook.sendMessage("✅ Your account has been linked!")
+                hook.sendMessage(successMsg)
                     .addEmbeds(tosCommandListener.createLinkTosPrompt(evt.getUser().getId()))
                     .setComponents(tosCommandListener.createTosButtons(evt.getUser().getId()))
                     .queue();
-                logger.info("[Sentinel] Linked Minecraft {} ↔ Discord {} - ToS prompt shown", uuid, evt.getUser().getId());
+                logger.info("[Sentinel] Linked {} {} ↔ Discord {} - ToS prompt shown", platformName, uuid, evt.getUser().getId());
             } else {
                 // Already agreed to ToS
-                hook.sendMessage("✅ Your account has been linked!").queue();
-                logger.info("[Sentinel] Linked Minecraft {} ↔ Discord {} - ToS already accepted", uuid, evt.getUser().getId());
+                hook.sendMessage(successMsg).queue();
+                logger.info("[Sentinel] Linked {} {} ↔ Discord {} - ToS already accepted", platformName, uuid, evt.getUser().getId());
             }
         } else {
             // ToS not enforced or managers not set
-            hook.sendMessage("✅ Your account has been linked!").queue();
-            logger.info("[Sentinel] Linked Minecraft {} ↔ Discord {}", uuid, evt.getUser().getId());
+            hook.sendMessage(successMsg).queue();
+            logger.info("[Sentinel] Linked {} {} ↔ Discord {}", platformName, uuid, evt.getUser().getId());
         }
     }
 }

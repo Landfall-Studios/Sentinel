@@ -1,3 +1,4 @@
 rootProject.name = 'Sentinel'
 includeBuild 'core'
 includeBuild 'velocity'
+includeBuild 'hytale'

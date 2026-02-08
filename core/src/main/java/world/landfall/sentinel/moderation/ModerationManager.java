@@ -1,5 +1,6 @@
 package world.landfall.sentinel.moderation;
 
+import world.landfall.sentinel.context.GamePlatform;
 import world.landfall.sentinel.db.DatabaseManager;
 import world.landfall.sentinel.db.LinkInfo;
 import world.landfall.sentinel.db.QuarantineInfo;
@@ -12,7 +13,6 @@ import org.slf4j.Logger;
 import java.awt.Color;
 import java.time.Instant;
 import java.util.List;
-import java.util.Optional;
 
 /**
  * Manages moderation actions including notes, warnings, bans, and audit logging.
@@ -41,8 +41,10 @@ public class ModerationManager {
      */
     public long recordNote(String discordId, String note, String issuedBy) {
         // Look up linked Minecraft account if exists
-        Optional<LinkInfo> linkInfo = db.findByDiscordId(discordId);
-        String minecraftUuid = linkInfo.map(info -> info.uuid().toString()).orElse(null);
+        List<LinkInfo> links = db.findByDiscordId(discordId);
+        String minecraftUuid = links.stream()
+                .filter(l -> l.platform() == GamePlatform.MINECRAFT)
+                .findFirst().map(l -> l.uuid().toString()).orElse(null);
 
         // Store in database
         long actionId = db.addModerationAction(discordId, minecraftUuid, "NOTE", note, issuedBy);
@@ -62,8 +64,10 @@ public class ModerationManager {
      */
     public long recordWarning(String discordId, String reason, String issuedBy) {
         // Look up linked Minecraft account if exists
-        Optional<LinkInfo> linkInfo = db.findByDiscordId(discordId);
-        String minecraftUuid = linkInfo.map(info -> info.uuid().toString()).orElse(null);
+        List<LinkInfo> links = db.findByDiscordId(discordId);
+        String minecraftUuid = links.stream()
+                .filter(l -> l.platform() == GamePlatform.MINECRAFT)
+                .findFirst().map(l -> l.uuid().toString()).orElse(null);
 
         // Store in database
         long actionId = db.addModerationAction(discordId, minecraftUuid, "WARN", reason, issuedBy);
@@ -90,8 +94,10 @@ public class ModerationManager {
      */
     public long recordBan(String discordId, String reason, String issuedBy, String duration) {
         // Look up linked Minecraft account if exists
-        Optional<LinkInfo> linkInfo = db.findByDiscordId(discordId);
-        String minecraftUuid = linkInfo.map(info -> info.uuid().toString()).orElse(null);
+        List<LinkInfo> links = db.findByDiscordId(discordId);
+        String minecraftUuid = links.stream()
+                .filter(l -> l.platform() == GamePlatform.MINECRAFT)
+                .findFirst().map(l -> l.uuid().toString()).orElse(null);
 
         // Store in database with duration
         long actionId = db.addModerationAction(discordId, minecraftUuid, "BAN", reason, issuedBy, duration);
@@ -111,8 +117,10 @@ public class ModerationManager {
      */
     public long recordUnban(String discordId, String reason, String issuedBy) {
         // Look up linked Minecraft account if exists
-        Optional<LinkInfo> linkInfo = db.findByDiscordId(discordId);
-        String minecraftUuid = linkInfo.map(info -> info.uuid().toString()).orElse(null);
+        List<LinkInfo> links = db.findByDiscordId(discordId);
+        String minecraftUuid = links.stream()
+                .filter(l -> l.platform() == GamePlatform.MINECRAFT)
+                .findFirst().map(l -> l.uuid().toString()).orElse(null);
 
         // Store in database
         long actionId = db.addModerationAction(discordId, minecraftUuid, "UNBAN", reason, issuedBy);

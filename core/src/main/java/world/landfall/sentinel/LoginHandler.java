@@ -1,6 +1,7 @@
 package world.landfall.sentinel;
 
 import world.landfall.sentinel.config.SentinelConfig;
+import world.landfall.sentinel.context.GamePlatform;
 import world.landfall.sentinel.context.LoginContext;
 import world.landfall.sentinel.context.LoginGatekeeper;
 import world.landfall.sentinel.db.DatabaseManager;
@@ -48,6 +49,7 @@ public class LoginHandler {
         UUID uuid = ctx.getPlayerUuid();
         String username = ctx.getPlayerUsername();
         String ipAddress = ctx.getIpAddress();
+        GamePlatform platform = ctx.getPlatform();
 
         // Check if this is an impersonated UUID and get the original if so
         UUID originalUuid = uuid;
@@ -79,8 +81,8 @@ public class LoginHandler {
         }
 
         try {
-            if (database.isLinked(originalUuid)) {
-                String discordId = database.getDiscordId(originalUuid);
+            if (database.isLinked(originalUuid, platform)) {
+                String discordId = database.getDiscordId(originalUuid, platform);
 
                 // Check if Discord user is still in the server
                 if (discordManager != null && discordManager.getQuarantineChecker() != null) {
@@ -91,7 +93,7 @@ public class LoginHandler {
                                 username, originalUuid, discordId);
 
                         String code = generateCode();
-                        database.savePendingCode(originalUuid, code);
+                        database.savePendingCode(originalUuid, code, platform);
 
                         if (ipLogger != null) {
                             ipLogger.logLogin(originalUuid, discordId, ipAddress, false, "Discord account no longer in server");
@@ -140,7 +142,7 @@ public class LoginHandler {
 
                 // Save the current username each login for quick lookup
                 if (!isImpersonating) {
-                    database.updateUsername(originalUuid, username);
+                    database.updateUsername(originalUuid, username, platform);
                 }
 
                 logger.debug("Player {} ({}) is linked. Allowing login.", username, originalUuid);
@@ -152,7 +154,7 @@ public class LoginHandler {
                 gatekeeper.allowLogin(ctx);
             } else {
                 // Check if they were linked but removed due to leaving Discord
-                String discordId = database.getDiscordId(originalUuid);
+                String discordId = database.getDiscordId(originalUuid, platform);
                 if (discordId != null) {
                     logger.warn("Player {} ({}) was linked but needs to relink.", username, originalUuid);
 
@@ -166,7 +168,7 @@ public class LoginHandler {
 
                 // Generate & rotate the code
                 String code = generateCode();
-                database.savePendingCode(originalUuid, code);
+                database.savePendingCode(originalUuid, code, platform);
 
                 logger.info("Player {} ({}) is not linked. Generated code: {}", username, originalUuid, code);
 

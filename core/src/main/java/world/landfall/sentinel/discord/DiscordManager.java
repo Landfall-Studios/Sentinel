@@ -4,8 +4,6 @@ import world.landfall.sentinel.db.DatabaseManager;
 import world.landfall.sentinel.config.SentinelConfig;
 import world.landfall.sentinel.tos.TosManager;
 import world.landfall.sentinel.moderation.ModerationManager;
-import world.landfall.sentinel.reputation.ReputationManager;
-import world.landfall.sentinel.reputation.ReputationScheduler;
 import world.landfall.sentinel.context.PlatformAdapter;
 import net.dv8tion.jda.api.JDA;
 import net.dv8tion.jda.api.JDABuilder;
@@ -33,13 +31,10 @@ public class DiscordManager extends ListenerAdapter {
     private BanCommandListener banListener;
     private UnbanCommandListener unbanListener;
     private HistoryCommandListener historyListener;
-    private ReputationCommandListener reputationListener;
     private RoleManager roleManager;
     private QuarantineChecker quarantineChecker;
     private TosManager tosManager;
     private ModerationManager moderationManager;
-    private ReputationManager reputationManager;
-    private ReputationScheduler reputationScheduler;
 
     private JDA jda;
 
@@ -69,10 +64,6 @@ public class DiscordManager extends ListenerAdapter {
         this.banListener = new BanCommandListener(db, moderationManager, staffRoles, quarantineRoleId, platformAdapter, config, logger);
         this.unbanListener = new UnbanCommandListener(db, moderationManager, staffRoles, quarantineRoleId, logger);
         this.historyListener = new HistoryCommandListener(db, moderationManager, staffRoles, logger);
-
-        // Initialize reputation system
-        this.reputationManager = new ReputationManager(db, config.reputation, logger);
-        this.reputationListener = new ReputationCommandListener(db, reputationManager, logger);
     }
 
     public void start() throws LoginException {
@@ -88,7 +79,6 @@ public class DiscordManager extends ListenerAdapter {
         listeners.add(banListener);
         listeners.add(unbanListener);
         listeners.add(historyListener);
-        listeners.add(reputationListener);
         listeners.add(this);
 
         jda = JDABuilder.createDefault(token)
@@ -108,14 +98,13 @@ public class DiscordManager extends ListenerAdapter {
         commands.add(banListener.getCommandData());
         commands.add(unbanListener.getCommandData());
         commands.add(historyListener.getCommandData());
-        commands.add(reputationListener.getCommandData());
 
         // Register slash commands
         jda.updateCommands().addCommands(commands).queue();
 
         String commandList = tosListener != null ?
-            "/link, /whois, /tos, /note, /warn, /ban, /unban, /history, and /rep" :
-            "/link, /whois, /note, /warn, /ban, /unban, /history, and /rep";
+            "/link, /whois, /tos, /note, /warn, /ban, /unban, and /history" :
+            "/link, /whois, /note, /warn, /ban, /unban, and /history";
         logger.info("[Sentinel] Discord bot started with {}.", commandList);
     }
 
@@ -138,11 +127,6 @@ public class DiscordManager extends ListenerAdapter {
             moderationManager.setJDA(jda);
         }
 
-        // Initialize reputation scheduler
-        if (reputationManager != null) {
-            reputationScheduler = new ReputationScheduler(db, reputationManager,
-                config.reputation, logger);
-        }
     }
 
     /**
@@ -166,19 +150,10 @@ public class DiscordManager extends ListenerAdapter {
         if (quarantineChecker != null) {
             quarantineChecker.shutdown();
         }
-        if (reputationScheduler != null) {
-            reputationScheduler.shutdown();
-        }
         if (jda != null) {
             jda.shutdown();
             logger.info("[Sentinel] Discord bot shut down.");
         }
     }
 
-    /**
-     * Gets the reputation manager.
-     */
-    public ReputationManager getReputationManager() {
-        return reputationManager;
-    }
 }

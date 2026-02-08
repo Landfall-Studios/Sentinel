@@ -1,5 +1,6 @@
 package world.landfall.sentinel.platform.velocity;
 
+import world.landfall.sentinel.context.GamePlatform;
 import world.landfall.sentinel.context.LoginContext;
 import com.velocitypowered.api.event.connection.LoginEvent;
 
@@ -33,6 +34,11 @@ public class VelocityLoginContext implements LoginContext {
     public Optional<String> getVirtualHost() {
         return event.getPlayer().getVirtualHost()
                 .map(host -> host.getHostString());
+    }
+
+    @Override
+    public GamePlatform getPlatform() {
+        return GamePlatform.MINECRAFT;
     }
 
     /**

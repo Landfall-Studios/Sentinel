@@ -81,13 +81,6 @@ public class VelocitySentinel {
             logger.info("Impersonation feature enabled with {} allowed users", config.impersonation.allowedUsers.length);
         }
 
-        // Register reputation command if Discord is enabled
-        if (discord != null && discord.getReputationManager() != null) {
-            VelocityReputationCommand repCommand = new VelocityReputationCommand(database, discord.getReputationManager(), logger);
-            server.getCommandManager().register("rep", repCommand, "reputation");
-            logger.info("Reputation command registered");
-        }
-
         // Initialize ToS manager and IP logger
         TosManager tosManager = null;
         IpLogger ipLogger = null;

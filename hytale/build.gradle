@@ -1,0 +1,84 @@
+plugins {
+    id 'java'
+    id 'com.gradleup.shadow' version '9.3.1'
+}
+
+group = 'world.landfall'
+version = '1.2.2'
+
+base {
+    archivesName = "sentinel-Hytale"
+}
+
+java {
+    toolchain.languageVersion = JavaLanguageVersion.of(21)
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // Core shared logic (resolved via composite build)
+    implementation 'world.landfall:sentinel-core'
+
+    // Hytale Server API (provided by server at runtime)
+    compileOnly(files(hytale_server_jar))
+
+    // SLF4J (bundled - Hytale's plugin classloader doesn't expose server's SLF4J)
+    implementation 'org.slf4j:slf4j-api:2.0.9'
+    implementation 'org.slf4j:slf4j-simple:2.0.9'
+
+    // Shaded dependencies (pulled transitively from core, but need to be in shadow jar)
+    implementation 'com.zaxxer:HikariCP:5.1.0'
+    implementation 'com.google.code.gson:gson:2.10.1'
+    implementation "mysql:mysql-connector-java:8.0.33"
+    implementation 'net.dv8tion:JDA:5.0.0-beta.8'
+    implementation 'com.google.code.findbugs:jsr305:3.0.2'
+}
+
+tasks {
+    compileJava {
+        options.encoding = 'UTF-8'
+        options.release = 21
+    }
+
+    processResources {
+        filteringCharset = 'UTF-8'
+
+        def replaceProperties = [
+            version: project.version
+        ]
+        inputs.properties replaceProperties
+
+        filesMatching('manifest.json') {
+            expand replaceProperties
+        }
+    }
+
+    jar {
+        enabled = false
+    }
+
+    shadowJar {
+        archiveClassifier.set('')
+
+        // Relocate bundled dependencies to avoid classpath conflicts
+        relocate 'com.zaxxer.hikari', 'world.landfall.sentinel.lib.hikari'
+        relocate 'com.google.gson', 'world.landfall.sentinel.lib.gson'
+        relocate 'com.mysql.cj', 'world.landfall.sentinel.lib.mysql'
+        relocate 'net.dv8tion.jda', 'world.landfall.sentinel.lib.jda'
+        relocate 'com.neovisionaries.ws', 'world.landfall.sentinel.lib.ws'
+        relocate 'okhttp3', 'world.landfall.sentinel.lib.okhttp3'
+        relocate 'okio', 'world.landfall.sentinel.lib.okio'
+
+        minimize {
+            exclude(dependency('org.slf4j:.*'))
+            exclude(dependency('mysql:.*'))
+        }
+    }
+
+    build {
+        dependsOn shadowJar
+    }
+}
